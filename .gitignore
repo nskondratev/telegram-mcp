@@ -1,0 +1,22 @@
+# The real allowlist holds chat ids — it belongs outside the repository
+# (~/.config/telegram-mcp/allowed_chats.json). Only the .example file is tracked.
+allowed_chats.json
+
+# Telethon sessions grant full access to the account
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+uv.lock
+.DS_Store

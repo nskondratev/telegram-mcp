@@ -1,0 +1,23 @@
+{
+  "_comment": "The single source of truth about which chats the assistant can see. Anything missing here is unreachable, private conversations included. Get the ids from `telegram-mcp dialogs`, pick a short latin alias for each — that is what tools refer to. Copy this file to ~/.config/telegram-mcp/allowed_chats.json and fill in real ids. Restart the MCP client after editing.",
+  "chats": [
+    {
+      "alias": "team",
+      "id": -1001111111111,
+      "title": "Team chat",
+      "note": "main work chat"
+    },
+    {
+      "alias": "alerts",
+      "id": -1002222222222,
+      "title": "Alerts",
+      "note": "monitoring alerts"
+    },
+    {
+      "alias": "colleague",
+      "id": 111111111,
+      "title": "Alice Smith",
+      "note": "direct chat with a teammate"
+    }
+  ]
+}
