@@ -1,8 +1,14 @@
 """Tests for locating and linking a message's media file."""
+import asyncio
+import datetime as dt
 import os
+from pathlib import Path
 from unittest import mock
 
-from telegram_mcp.media import canonical_name, find_local_copy, link_or_copy
+import pytest
+
+from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed
+from telegram_mcp.media import canonical_name, download_message_media, find_local_copy, link_or_copy
 
 
 def write(path, size, mtime=None):
@@ -123,3 +129,116 @@ class TestLinkOrCopy:
         assert dst.read_bytes() == src.read_bytes()
         # Verify it's a copy, not a link (different inode)
         assert dst.stat().st_ino != src.stat().st_ino
+
+
+TEAM = ChatEntry(alias="team", id=-1001111111111, title="Team chat")
+
+
+class FakeEntity:
+    def __init__(self, id, title):
+        self.id = id
+        self.title = title
+
+
+class FakeFile:
+    def __init__(self, size, name=None, ext=".mp4", duration=None):
+        self.size = size
+        self.name = name
+        self.ext = ext
+        self.mime_type = "video/mp4"
+        self.duration = duration
+
+
+class FakeMessage:
+    def __init__(self, id=4242, file=None, text="here is the recording"):
+        self.id = id
+        self.text = text
+        self.message = text
+        self.sender = None
+        self.sender_id = 42
+        self.date = dt.datetime(2026, 8, 3, 9, 0, tzinfo=dt.timezone.utc)
+        self.media = object() if file else None
+        self.file = file
+
+
+class FakeClient:
+    """Telethon stand-in that records where it was asked to go."""
+
+    def __init__(self, message=None, payload=b"video-bytes"):
+        self.entities = {TEAM.id: FakeEntity(TEAM.id, TEAM.title)}
+        self.message = message
+        self.payload = payload
+        self.calls = []
+
+    async def get_entity(self, chat_id):
+        self.calls.append(("get_entity", chat_id))
+        return self.entities[chat_id]
+
+    async def get_messages(self, entity, **kwargs):
+        self.calls.append(("get_messages", entity.id, kwargs))
+        return self.message
+
+    async def download_media(self, message, file, progress_callback=None):
+        self.calls.append(("download_media", file))
+        Path(file).write_bytes(self.payload)
+        return file
+
+
+def allowlist():
+    return AllowList([TEAM])
+
+
+def run(client, chat, out_dir, lookup_dirs=(), message_id=4242):
+    return asyncio.run(
+        download_message_media(client, allowlist(), chat, message_id, out_dir, lookup_dirs)
+    )
+
+
+class TestDownloadMessageMedia:
+    def test_downloads_over_the_network_when_nothing_local(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, duration=462)))
+        result = run(client, "team", tmp_path)
+        assert result["source"] == "network"
+        assert Path(result["path"]) == tmp_path / "team-4242.mp4"
+        assert Path(result["path"]).read_bytes() == b"video-bytes"
+        assert result["duration"] == 462
+        assert result["caption"] == "here is the recording"
+        assert result["chat"]["alias"] == "team"
+
+    def test_uses_the_local_copy_instead_of_the_network(self, tmp_path):
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        (downloads / "Screen Recording.mov").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name="Screen Recording.mov", ext=".mov")))
+        result = run(client, "team", tmp_path / "cache", [downloads])
+        assert result["source"] == "local"
+        assert result["origin"] == str(downloads / "Screen Recording.mov")
+        assert ("download_media", str(tmp_path / "cache" / "team-4242.mov")) not in client.calls
+
+    def test_existing_file_of_the_right_size_is_reused(self, tmp_path):
+        (tmp_path / "team-4242.mp4").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        result = run(client, "team", tmp_path)
+        assert result["source"] == "cache"
+        assert not any(call[0] == "download_media" for call in client.calls)
+
+    def test_existing_file_of_a_different_size_is_refetched(self, tmp_path):
+        (tmp_path / "team-4242.mp4").write_bytes(b"truncated")
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        assert run(client, "team", tmp_path)["source"] == "network"
+
+    def test_chat_outside_the_allowlist_never_reaches_the_network(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        with pytest.raises(ChatNotAllowed):
+            run(client, -1009999999999, tmp_path)
+        assert client.calls == []
+
+    def test_message_without_media_is_a_clear_error(self, tmp_path):
+        client = FakeClient(FakeMessage(file=None))
+        with pytest.raises(ValueError, match="no downloadable media"):
+            run(client, "team", tmp_path)
+
+    def test_missing_message_is_a_clear_error(self, tmp_path):
+        client = FakeClient(None)
+        with pytest.raises(ValueError, match="not found"):
+            run(client, "team", tmp_path)

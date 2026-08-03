@@ -13,6 +13,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from .core import AllowList, sanitize_text
+from .handlers import _display_name, _entity_of, _media_type
+
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
 DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Desktop")
 
@@ -99,3 +102,83 @@ def link_or_copy(src: Path, dst: Path) -> str:
         # Clean up the temp file if the operation failed
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _file_meta(message) -> dict:
+    """Size, name, extension and duration of the message's media, if any."""
+    file = getattr(message, "file", None)
+    if file is None:
+        return {}
+    return {
+        "size": getattr(file, "size", None),
+        "name": getattr(file, "name", None),
+        "ext": getattr(file, "ext", None) or "",
+        "duration": getattr(file, "duration", None),
+    }
+
+
+async def download_message_media(
+    client,
+    allowlist: AllowList,
+    chat,
+    message_id: int,
+    out_dir,
+    lookup_dirs=None,
+) -> dict:
+    """The media file of one message, on disk, plus everything known about it.
+
+    The allowlist is checked before anything touches the network, exactly as in
+    the read tools. Downloading is a read: no write capability is added anywhere.
+    """
+    entry, entity = await _entity_of(client, allowlist, chat)
+    message = await client.get_messages(entity, ids=int(message_id))
+    if isinstance(message, list):
+        message = message[0] if message else None
+    if message is None:
+        raise ValueError(f"Message {message_id} not found in {entry.alias!r}.")
+
+    meta = _file_meta(message)
+    size = meta.get("size")
+    if not size:
+        raise ValueError(
+            f"Message {message_id} in {entry.alias!r} carries no downloadable media "
+            f"(media: {_media_type(message) or 'none'})."
+        )
+
+    out_dir = Path(out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / canonical_name(entry.alias, message_id, meta.get("ext") or "")
+
+    source = "network"
+    origin = None
+    if target.is_file() and target.stat().st_size == size:
+        source = "cache"
+    else:
+        local = find_local_copy(
+            lookup_dirs if lookup_dirs is not None else DEFAULT_LOOKUP_DIRS,
+            size=size,
+            filename=meta.get("name"),
+            ext=meta.get("ext") or None,
+        )
+        if local is not None:
+            link_or_copy(local, target)
+            source = "local"
+            origin = str(local)
+        else:
+            await client.download_media(message, file=str(target))
+
+    date = getattr(message, "date", None)
+    return {
+        "path": str(target),
+        "chat": {"alias": entry.alias, "id": entry.id, "title": _display_name(entity, entry.title)},
+        "message_id": int(message_id),
+        "date": date.isoformat() if date is not None else None,
+        "sender": _display_name(getattr(message, "sender", None)),
+        "caption": sanitize_text(getattr(message, "text", None) or ""),
+        "media_type": _media_type(message),
+        "size": size,
+        "duration": meta.get("duration"),
+        "file_name": meta.get("name"),
+        "source": source,
+        "origin": origin,
+    }
