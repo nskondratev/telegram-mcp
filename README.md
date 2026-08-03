@@ -150,6 +150,29 @@ uvx --from git+https://github.com/nskondratev/telegram-mcp telegram-mcp check
 `check` reads every allowed chat and then tries a chat that is not on the list, so a
 broken allowlist shows up here rather than mid-conversation.
 
+### `download` — the media file of one message
+
+```bash
+telegram-mcp download "https://t.me/c/1234567890/8/4242" --out ~/Downloads
+telegram-mcp download team --message 4242 --out ~/Downloads --json
+```
+
+Both private (`t.me/c/…`, forum topics included) and public (`t.me/name/…`) links
+are understood; the chat still has to be on the allowlist, and that is checked
+before anything touches the network.
+
+Before downloading, the command looks for a copy the desktop client already has.
+Matching is by the document's own file name, falling back to an exact byte size,
+in the directories given by `--lookup-dir` (by default `~/Downloads/Telegram Lite`
+and `~/Downloads/Telegram Desktop`). A match is hard linked into `--out`, which
+costs no disk space and no traffic. `--json` prints everything known about the
+message: chat, sender, date, caption, media type, size, duration, and whether the
+file came from the cache, a local copy or the network.
+
+**This is still read-only.** Downloading is a read; no tool that writes to
+Telegram exists here. `download` is a CLI command and is deliberately not exposed
+as an MCP tool — the assistant reads chats, the human fetches files.
+
 ## Configuration
 
 | Variable | Meaning |
@@ -180,8 +203,9 @@ starts the real server over stdio and asserts that a forbidden chat is rejected 
 any Telegram credentials are even looked at.
 
 Layout: `core.py` — allowlist and sanitising; `handlers.py` — the five read operations;
-`client.py` — a Telethon wrapper that warms the dialog cache; `server.py` — MCP tool
-definitions; `cli.py` — `serve` / `login` / `dialogs` / `check`.
+`links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
+media file; `client.py` — a Telethon wrapper that warms the dialog cache; `server.py` — MCP
+tool definitions; `cli.py` — `serve` / `login` / `dialogs` / `check` / `download`.
 
 The installable distribution is named `telegram-allowlist-mcp`; the import package and the
 command are both `telegram_mcp` / `telegram-mcp`.
