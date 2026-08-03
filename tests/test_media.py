@@ -34,6 +34,11 @@ class TestCanonicalName:
 
 
 class TestFindLocalCopy:
+    @pytest.fixture(autouse=True)
+    def _no_size_floor(self, monkeypatch):
+        """These tests exercise matching mechanics, not the anti-collision floor."""
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 0)
+
     def test_finds_by_exact_document_name(self, tmp_path):
         target = write(tmp_path / "Screen Recording.mov", 1024)
         write(tmp_path / "other.mov", 2048)
@@ -96,6 +101,36 @@ class TestFindLocalCopy:
         # Test that ext="mp4" (without dot) matches ".mp4" files, like canonical_name does
         target = write(tmp_path / "video.mp4", 4096)
         assert find_local_copy([tmp_path], size=4096, ext="mp4") == target
+
+
+class TestFindLocalCopySizeFloor:
+    """A short voice note or video circle must not be matched by size alone."""
+
+    def test_size_only_match_is_skipped_below_the_floor(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 1000)
+        write(tmp_path / "voice-note-a.oga", 500)
+        # A same-size file exists, but 500 bytes is below the floor, so it must
+        # not be trusted as a match — unlike the filename-matched case above.
+        assert find_local_copy([tmp_path], size=500) is None
+
+    def test_size_only_match_still_works_at_or_above_the_floor(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 1000)
+        target = write(tmp_path / "screen-recording.mp4", 1000)
+        assert find_local_copy([tmp_path], size=1000) == target
+
+    def test_filename_match_ignores_the_floor(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 1_000_000)
+        target = write(tmp_path / "voice-note.oga", 500)
+        # A tiny voice note, floor set high enough to forbid the size-only path
+        # entirely — an exact filename match must still win.
+        assert find_local_copy([tmp_path], size=500, filename="voice-note.oga") == target
+
+    def test_default_floor_is_defensible(self):
+        from telegram_mcp.media import MIN_SIZE_FOR_SIZE_ONLY_FALLBACK
+
+        # Well above a 60-second Telegram video circle even at a generous
+        # bitrate, and well below the multi-hundred-MB videos this exists for.
+        assert 10_000_000 <= MIN_SIZE_FOR_SIZE_ONLY_FALLBACK <= 100_000_000
 
 
 class TestLinkOrCopy:
@@ -169,6 +204,7 @@ class FakeClient:
         self.message = message
         self.payload = payload
         self.calls = []
+        self.last_progress_callback = "not-called"
 
     async def get_entity(self, chat_id):
         self.calls.append(("get_entity", chat_id))
@@ -180,6 +216,7 @@ class FakeClient:
 
     async def download_media(self, message, file, progress_callback=None):
         self.calls.append(("download_media", file))
+        self.last_progress_callback = progress_callback
         Path(file).write_bytes(self.payload)
         return file
 
@@ -188,9 +225,11 @@ def allowlist():
     return AllowList([TEAM])
 
 
-def run(client, chat, out_dir, lookup_dirs=(), message_id=4242):
+def run(client, chat, out_dir, lookup_dirs=(), message_id=4242, progress_callback=None):
     return asyncio.run(
-        download_message_media(client, allowlist(), chat, message_id, out_dir, lookup_dirs)
+        download_message_media(
+            client, allowlist(), chat, message_id, out_dir, lookup_dirs, progress_callback=progress_callback
+        )
     )
 
 
@@ -242,3 +281,24 @@ class TestDownloadMessageMedia:
         client = FakeClient(None)
         with pytest.raises(ValueError, match="not found"):
             run(client, "team", tmp_path)
+
+    def test_forwards_the_progress_callback_on_a_network_download(self, tmp_path):
+        def progress(current, total):
+            pass
+
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, duration=462)))
+        result = run(client, "team", tmp_path, progress_callback=progress)
+        assert result["source"] == "network"
+        assert client.last_progress_callback is progress
+
+    def test_progress_callback_is_unused_when_a_local_copy_is_found(self, tmp_path):
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        (downloads / "Screen Recording.mov").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name="Screen Recording.mov", ext=".mov")))
+
+        result = run(
+            client, "team", tmp_path / "cache", [downloads], progress_callback=lambda c, t: None
+        )
+        assert result["source"] == "local"
+        assert client.last_progress_callback == "not-called"

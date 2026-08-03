@@ -19,6 +19,15 @@ from .handlers import _display_name, _entity_of, _media_type
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
 DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Desktop")
 
+#: Below this size, matching by byte count alone risks a false positive: two
+#: unrelated voice notes or Telegram's round, 60-second-capped "video circles"
+#: can easily share a byte count, and both carry no filename at all — unlike a
+#: document, so they always reach this fallback rather than the exact match
+#: above. The floor sits comfortably above what a circle produces even at a
+#: generous bitrate (well under a minute of video), and far below any video
+#: actually worth fetching this way. Filename matching is not affected by it.
+MIN_SIZE_FOR_SIZE_ONLY_FALLBACK = 20_000_000  # bytes
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
@@ -36,6 +45,12 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     The document's own name wins when Telegram reports one; otherwise the search
     falls back to an exact byte size, which for a video is unambiguous in
     practice. Several candidates of the same size — the most recent one.
+
+    Below ``MIN_SIZE_FOR_SIZE_ONLY_FALLBACK``, the size-only fallback is
+    skipped entirely and only a filename match (above) is trusted: voice
+    notes and video circles have no filename and so always reach the
+    fallback, and short clips collide on size far more easily than a
+    gigabyte-scale screen recording does.
     """
     bases = [Path(raw).expanduser() for raw in dirs]
 
@@ -47,6 +62,9 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
                     return candidate
             except OSError:
                 continue
+
+    if size < MIN_SIZE_FOR_SIZE_ONLY_FALLBACK:
+        return None
 
     # Normalize ext to have leading dot, matching canonical_name behavior
     normalized_ext = None
@@ -124,11 +142,16 @@ async def download_message_media(
     message_id: int,
     out_dir,
     lookup_dirs=None,
+    progress_callback=None,
 ) -> dict:
     """The media file of one message, on disk, plus everything known about it.
 
     The allowlist is checked before anything touches the network, exactly as in
     the read tools. Downloading is a read: no write capability is added anywhere.
+
+    ``progress_callback`` only ever reaches Telethon on the network branch
+    below: a cache hit returns before anything is read, and a local copy is
+    hard linked (or copied) in one call with nothing to report progress on.
     """
     entry, entity = await _entity_of(client, allowlist, chat)
     message = await client.get_messages(entity, ids=int(message_id))
@@ -165,7 +188,9 @@ async def download_message_media(
             source = "local"
             origin = str(local)
         else:
-            await client.download_media(message, file=str(target))
+            await client.download_media(
+                message, file=str(target), progress_callback=progress_callback
+            )
 
     date = getattr(message, "date", None)
     return {

@@ -193,7 +193,7 @@ right after the server is wired into Claude Code.
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 54 tests, no account or network required
+uv run --extra dev pytest      # 111 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 

@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 from . import handlers, media
@@ -203,6 +204,32 @@ async def cmd_check(allowlist_path: Path) -> None:
         raise SystemExit(1)
 
 
+def _stderr_progress(label: str = "download"):
+    """A throttled Telethon ``progress_callback`` that reports to stderr.
+
+    Telethon calls this once per chunk received — every few hundred KB — so
+    printing on every call would flood the terminal over a large file. Only
+    whole-percent changes are actually written (about a hundred lines for
+    the whole transfer, however long it takes), plus always the final call,
+    so a multi-minute download says something roughly every percent instead
+    of sitting silent until it either finishes or looks hung. Goes to stderr
+    so it never lands in `--json` output, which is stdout-only.
+    """
+    last_pct = -1
+
+    def report(current: int, total: int) -> None:
+        nonlocal last_pct
+        pct = int(current * 100 / total) if total else 0
+        done = bool(total) and current >= total
+        if pct == last_pct and not done:
+            return
+        last_pct = pct
+        end = "\n" if done else ""
+        print(f"\r{label}: {pct}% ({current}/{total} bytes)", end=end, file=sys.stderr, flush=True)
+
+    return report
+
+
 async def cmd_download(target, message_id, out, lookup_dirs, as_json, allowlist_path: Path) -> None:
     allowlist = load_allowlist(allowlist_path)
     chat_ref, msg_id = resolve_target(target, message_id)
@@ -210,15 +237,23 @@ async def cmd_download(target, message_id, out, lookup_dirs, as_json, allowlist_
     client = await _connected(session_string())
     try:
         result = await media.download_message_media(
-            CachedClient(client), allowlist, chat_ref, msg_id, out, lookup_dirs
+            CachedClient(client),
+            allowlist,
+            chat_ref,
+            msg_id,
+            out,
+            lookup_dirs,
+            progress_callback=_stderr_progress(),
         )
     finally:
         await client.disconnect()
 
+    result["allowlist_path"] = str(allowlist_path)
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     origin = f" (from {result['origin']})" if result["origin"] else ""
+    print(f"allowlist: {result['allowlist_path']}")
     print(f"{result['source']}: {result['path']}{origin}")
 
 
