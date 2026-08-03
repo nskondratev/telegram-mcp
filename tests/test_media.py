@@ -1,5 +1,6 @@
 """Tests for locating and linking a message's media file."""
 import os
+from unittest import mock
 
 from telegram_mcp.media import canonical_name, find_local_copy, link_or_copy
 
@@ -60,6 +61,36 @@ class TestFindLocalCopy:
     def test_missing_directory_is_not_an_error(self, tmp_path):
         assert find_local_copy([tmp_path / "nope"], size=4096, ext=".mp4") is None
 
+    def test_unreadable_directory_is_skipped(self, tmp_path):
+        # Create a file in an unreadable directory; should skip it and continue
+        unreadable = tmp_path / "noaccess"
+        unreadable.mkdir()
+        write(unreadable / "file.mp4", 4096)
+        # Create a matching file in a readable directory
+        target = write(tmp_path / "readable" / "file.mp4", 4096)
+        # Make the first directory unreadable
+        try:
+            unreadable.chmod(0o000)
+            # Should skip the unreadable dir and find the file in readable dir
+            assert find_local_copy([unreadable, tmp_path / "readable"], size=4096, ext=".mp4") == target
+        finally:
+            # Restore permissions so pytest can clean up
+            unreadable.chmod(0o755)
+
+    def test_broken_symlink_is_skipped(self, tmp_path):
+        # Create a broken symlink
+        broken = tmp_path / "broken.mp4"
+        broken.symlink_to("/nonexistent/path")
+        # Create a valid file with matching size
+        target = write(tmp_path / "valid.mp4", 4096)
+        # Should skip broken symlink and find the valid file
+        assert find_local_copy([tmp_path], size=4096, ext=".mp4") == target
+
+    def test_extension_without_dot_is_normalized(self, tmp_path):
+        # Test that ext="mp4" (without dot) matches ".mp4" files, like canonical_name does
+        target = write(tmp_path / "video.mp4", 4096)
+        assert find_local_copy([tmp_path], size=4096, ext="mp4") == target
+
 
 class TestLinkOrCopy:
     def test_hard_links_the_file(self, tmp_path):
@@ -81,3 +112,14 @@ class TestLinkOrCopy:
         link_or_copy(src, dst)
         dst.unlink()
         assert src.exists()
+
+    def test_falls_back_to_copy_when_link_fails(self, tmp_path):
+        src = write(tmp_path / "src.mp4", 128)
+        dst = tmp_path / "cache" / "team-1.mp4"
+        # Monkeypatch os.link to raise OSError (e.g., cross-volume link)
+        with mock.patch("os.link", side_effect=OSError("Cross-device link")):
+            result = link_or_copy(src, dst)
+        assert result == "copy"
+        assert dst.read_bytes() == src.read_bytes()
+        # Verify it's a copy, not a link (different inode)
+        assert dst.stat().st_ino != src.stat().st_ino

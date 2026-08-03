@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
@@ -38,19 +39,33 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     if filename:
         for base in bases:
             candidate = base / filename
-            if candidate.is_file() and candidate.stat().st_size == size:
-                return candidate
+            try:
+                if candidate.is_file() and candidate.stat().st_size == size:
+                    return candidate
+            except OSError:
+                continue
+
+    # Normalize ext to have leading dot, matching canonical_name behavior
+    normalized_ext = None
+    if ext:
+        normalized_ext = ext if ext.startswith(".") else f".{ext}"
 
     found: list[Path] = []
     for base in bases:
         if not base.is_dir():
             continue
-        for path in base.iterdir():
-            if not path.is_file() or path.stat().st_size != size:
-                continue
-            if ext and path.suffix.lower() != ext.lower():
-                continue
-            found.append(path)
+        try:
+            for path in base.iterdir():
+                try:
+                    if not path.is_file() or path.stat().st_size != size:
+                        continue
+                    if normalized_ext and path.suffix.lower() != normalized_ext.lower():
+                        continue
+                    found.append(path)
+                except OSError:
+                    continue
+        except OSError:
+            continue
 
     if not found:
         return None
@@ -65,11 +80,22 @@ def link_or_copy(src: Path, dst: Path) -> str:
     Across volumes hard links are impossible, so it degrades to a copy.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        dst.unlink()
+    # Write to a temp file first, then atomically replace the destination.
+    # This ensures dst is only removed once the replacement is complete.
+    fd, tmp_name = tempfile.mkstemp(dir=dst.parent)
+    os.close(fd)  # Close the file descriptor; we only need the path
+    tmp_path = Path(tmp_name)
     try:
-        os.link(src, dst)
-        return "link"
-    except OSError:
-        shutil.copy2(src, dst)
-        return "copy"
+        tmp_path.unlink()  # Remove the empty file created by mkstemp
+        try:
+            os.link(src, tmp_path)
+            result = "link"
+        except OSError:
+            shutil.copy2(src, tmp_path)
+            result = "copy"
+        os.replace(tmp_path, dst)
+        return result
+    except Exception:
+        # Clean up the temp file if the operation failed
+        tmp_path.unlink(missing_ok=True)
+        raise
