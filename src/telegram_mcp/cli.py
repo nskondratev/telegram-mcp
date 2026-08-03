@@ -1,9 +1,10 @@
-"""Command line entry point: serve, login, dialogs, check.
+"""Command line entry point: serve, login, dialogs, check, download.
 
     telegram-mcp serve     run the MCP server over stdio (this is what the client starts)
     telegram-mcp login     issue a session string (asks for phone, code and 2FA password)
     telegram-mcp dialogs   list your chats with their ids, to fill in the allowlist
     telegram-mcp check     verify that every allowed chat resolves and reads
+    telegram-mcp download  save the media file of one message, by link or by alias
 
 `dialogs` deliberately lives here and not in the MCP server: the full list of
 your conversations is for your terminal only, the assistant sees allowlisted
@@ -18,11 +19,13 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
-from . import handlers
+from . import handlers, media
 from .client import CachedClient
 from .core import ALLOWLIST_ENV, default_allowlist_path, load_allowlist
+from .links import parse_message_link
 
 REPO_URL = "https://github.com/nskondratev/telegram-mcp"
 
@@ -65,6 +68,27 @@ def credentials() -> tuple[int, str]:
             "https://my.telegram.org/apps and pass them as environment variables."
         )
     return int(api_id), api_hash
+
+
+def resolve_allowlist_path(explicit: str | None) -> Path:
+    """Where the allowlist comes from: the flag, then ~/.claude.json, then the default.
+
+    The path lives next to the credentials in the MCP server config, so the CLI
+    commands work right after the server is wired up, with nothing to export.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    from_config = read_env(ALLOWLIST_ENV)
+    return Path(from_config).expanduser() if from_config else default_allowlist_path()
+
+
+def resolve_target(target: str, message_id: int | None) -> tuple[int | str, int]:
+    """A t.me link, or a chat reference plus an explicit message id."""
+    if target.startswith(("http://", "https://")):
+        return parse_message_link(target)
+    if message_id is None:
+        raise SystemExit("A chat reference needs --message <id>, or pass a full t.me link instead.")
+    return target, int(message_id)
 
 
 def build_client(session: str | None):
@@ -180,6 +204,59 @@ async def cmd_check(allowlist_path: Path) -> None:
         raise SystemExit(1)
 
 
+def _stderr_progress(label: str = "download"):
+    """A throttled Telethon ``progress_callback`` that reports to stderr.
+
+    Telethon calls this once per chunk received — every few hundred KB — so
+    printing on every call would flood the terminal over a large file. Only
+    whole-percent changes are actually written (about a hundred lines for
+    the whole transfer, however long it takes), plus always the final call,
+    so a multi-minute download says something roughly every percent instead
+    of sitting silent until it either finishes or looks hung. Goes to stderr
+    so it never lands in `--json` output, which is stdout-only.
+    """
+    last_pct = -1
+
+    def report(current: int, total: int) -> None:
+        nonlocal last_pct
+        pct = int(current * 100 / total) if total else 0
+        done = bool(total) and current >= total
+        if pct == last_pct and not done:
+            return
+        last_pct = pct
+        end = "\n" if done else ""
+        print(f"\r{label}: {pct}% ({current}/{total} bytes)", end=end, file=sys.stderr, flush=True)
+
+    return report
+
+
+async def cmd_download(target, message_id, out, lookup_dirs, as_json, allowlist_path: Path) -> None:
+    allowlist = load_allowlist(allowlist_path)
+    chat_ref, msg_id = resolve_target(target, message_id)
+
+    client = await _connected(session_string())
+    try:
+        result = await media.download_message_media(
+            CachedClient(client),
+            allowlist,
+            chat_ref,
+            msg_id,
+            out,
+            lookup_dirs,
+            progress_callback=_stderr_progress(),
+        )
+    finally:
+        await client.disconnect()
+
+    result["allowlist_path"] = str(allowlist_path)
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    origin = f" (from {result['origin']})" if result["origin"] else ""
+    print(f"allowlist: {result['allowlist_path']}")
+    print(f"{result['source']}: {result['path']}{origin}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="telegram-mcp",
@@ -199,12 +276,26 @@ def build_parser() -> argparse.ArgumentParser:
     dialogs.add_argument("--limit", type=int, default=200, help="how many dialogs to scan")
     dialogs.add_argument("--json", action="store_true", help="print an allowed_chats.json skeleton")
     sub.add_parser("check", help="verify the allowlist against live Telegram")
+
+    download = sub.add_parser("download", help="download the media file of one message")
+    download.add_argument("target", help="a t.me message link, or a chat alias with --message")
+    download.add_argument("--message", type=int, help="message id, when target is a chat reference")
+    download.add_argument("--out", default=".", help="directory to put the file in")
+    download.add_argument(
+        "--lookup-dir",
+        action="append",
+        dest="lookup_dirs",
+        metavar="DIR",
+        help="where the desktop client keeps its downloads; repeatable. "
+        f"Default: {', '.join(media.DEFAULT_LOOKUP_DIRS)}",
+    )
+    download.add_argument("--json", action="store_true", help="print the whole result as JSON")
     return parser
 
 
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
-    allowlist_path = Path(args.allowlist).expanduser() if args.allowlist else default_allowlist_path()
+    allowlist_path = resolve_allowlist_path(args.allowlist)
 
     if args.command == "serve":
         from .server import serve
@@ -214,6 +305,12 @@ def main(argv=None) -> None:
         asyncio.run(cmd_login())
     elif args.command == "dialogs":
         asyncio.run(cmd_dialogs(args.pattern, args.limit, args.json, allowlist_path))
+    elif args.command == "download":
+        asyncio.run(
+            cmd_download(
+                args.target, args.message, args.out, args.lookup_dirs, args.json, allowlist_path
+            )
+        )
     else:
         asyncio.run(cmd_check(allowlist_path))
 

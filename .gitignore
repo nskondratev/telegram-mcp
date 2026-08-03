@@ -20,3 +20,7 @@ venv/
 .ruff_cache/
 uv.lock
 .DS_Store
+
+# Superpowers scratch space (previously excluded only via the local,
+# unversioned .git/info/exclude — a fresh clone needs this too)
+.superpowers/

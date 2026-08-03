@@ -25,3 +25,8 @@ class CachedClient:
 
     async def get_messages(self, entity, **kwargs):
         return await self._inner.get_messages(entity, **kwargs)
+
+    async def download_media(self, message, file, progress_callback=None):
+        return await self._inner.download_media(
+            message, file=file, progress_callback=progress_callback
+        )
