@@ -38,9 +38,9 @@ that gap is the whole point of this server:
 - **Fetching a file is still reading.** `get_message_media` downloads an attachment
   through the same allowlist check, and pictures it hands back are untrusted data
   like any text: a screenshot can carry what looks like an instruction.
-- **Text is data, not instructions.** Message texts, names and titles are sanitised
-  (zero-width characters, bidi overrides, control characters) and truncated, and the tool
-  descriptions tell the model to treat them as untrusted input.
+- **Text is data, not instructions.** Message texts, names, titles and attachment file
+  names are sanitised (zero-width characters, bidi overrides, control characters) and
+  truncated, and the tool descriptions tell the model to treat them as untrusted input.
 - **The allowlist lives outside the installation.** By default it is read from
   `~/.config/telegram-mcp/allowed_chats.json`, so real chat ids never end up next to the
   code — which is what makes running straight from a git URL safe.
@@ -173,9 +173,9 @@ costs no disk space and no traffic. `--json` prints everything known about the
 message: chat, sender, date, caption, media type, size, duration, and whether the
 file came from the cache, a local copy or the network.
 
-**This is still read-only.** Downloading is a read; no tool that writes to
-Telegram exists here. `download` is a CLI command and is deliberately not exposed
-as an MCP tool — the assistant reads chats, the human fetches files.
+**This is still read-only.** Fetching a file is a read either way: the `download`
+command serves the human at the terminal, `get_message_media` serves the model,
+and both go through the same allowlist check before anything touches the network.
 
 ## Configuration
 
