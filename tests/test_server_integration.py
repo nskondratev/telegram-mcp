@@ -13,7 +13,7 @@ FORBIDDEN_CHAT = "-1001234567890"
 ALLOWED_CHAT_ID = -1005555555555
 
 
-def call_tool(name, arguments, allowlist_path, timeout=180):
+def rpc(method, params, allowlist_path, timeout=180):
     requests = [
         {
             "jsonrpc": "2.0",
@@ -26,12 +26,7 @@ def call_tool(name, arguments, allowlist_path, timeout=180):
             },
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        },
+        {"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
     ]
     # Credentials are stripped on purpose: the server must refuse a forbidden chat
     # without them, and must ask for them as soon as a chat is allowed.
@@ -62,6 +57,10 @@ def call_tool(name, arguments, allowlist_path, timeout=180):
         proc.wait(timeout=timeout)
 
 
+def call_tool(name, arguments, allowlist_path, timeout=180):
+    return rpc("tools/call", {"name": name, "arguments": arguments}, allowlist_path, timeout)
+
+
 def write_allowlist(tmp_path):
     path = tmp_path / "allowed_chats.json"
     path.write_text(
@@ -82,3 +81,28 @@ def test_allowed_chat_reaches_telegram_layer(tmp_path):
     """An allowed chat goes further — and stops at the missing credentials."""
     response = call_tool("get_messages", {"chat": "work", "limit": 5}, write_allowlist(tmp_path))
     assert "TELEGRAM_API_ID" in json.dumps(response, ensure_ascii=False)
+
+
+def test_media_tool_is_registered_and_read_only(tmp_path):
+    response = rpc("tools/list", {}, write_allowlist(tmp_path))
+    tools = {tool["name"]: tool for tool in response["result"]["tools"]}
+    assert set(tools) == {
+        "list_chats",
+        "get_chat_info",
+        "get_messages",
+        "get_message_context",
+        "search_messages",
+        "get_message_media",
+    }
+    assert tools["get_message_media"]["annotations"]["readOnlyHint"] is True
+
+
+def test_media_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
+    response = call_tool(
+        "get_message_media",
+        {"chat": FORBIDDEN_CHAT, "message_id": 1},
+        write_allowlist(tmp_path),
+    )
+    text = json.dumps(response, ensure_ascii=False)
+    assert "allowlist" in text, text
+    assert "TELEGRAM_API_ID" not in text, "went to Telegram first and checked the allowlist after"
