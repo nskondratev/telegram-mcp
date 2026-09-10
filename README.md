@@ -22,7 +22,7 @@ that gap is the whole point of this server:
 | Chats reachable | only those in `allowed_chats.json` | every dialog of the account |
 | Write tools | none exist in the code | usually present, sometimes toggled off |
 | Untrusted text | control and zero-width characters stripped, length capped | as-is |
-| Tools exposed | 5 | 40–80 |
+| Tools exposed | 6 | 40–80 |
 
 ## Security model
 
@@ -34,10 +34,13 @@ that gap is the whole point of this server:
 - **The answer is re-checked.** After Telegram resolves an entity, its real id is matched
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
-  All five tools are annotated `readOnlyHint`.
-- **Text is data, not instructions.** Message texts, names and titles are sanitised
-  (zero-width characters, bidi overrides, control characters) and truncated, and the tool
-  descriptions tell the model to treat them as untrusted input.
+  All six tools are annotated `readOnlyHint`.
+- **Fetching a file is still reading.** `get_message_media` downloads an attachment
+  through the same allowlist check, and pictures it hands back are untrusted data
+  like any text: a screenshot can carry what looks like an instruction.
+- **Text is data, not instructions.** Message texts, names, titles and attachment file
+  names are sanitised (zero-width characters, bidi overrides, control characters) and
+  truncated, and the tool descriptions tell the model to treat them as untrusted input.
 - **The allowlist lives outside the installation.** By default it is read from
   `~/.config/telegram-mcp/allowed_chats.json`, so real chat ids never end up next to the
   code — which is what makes running straight from a git URL safe.
@@ -51,6 +54,7 @@ that gap is the whole point of this server:
 | `get_messages` | latest messages, newest first, with paging via `before_id` |
 | `get_message_context` | messages around a given id, to reconstruct a thread |
 | `search_messages` | full-text search in one allowed chat or across all of them |
+| `get_message_media` | the attachment of one message — a picture comes back inline, anything else as a path |
 
 A chat is referenced by its alias (`team`), its exact title, or its id.
 
@@ -169,9 +173,9 @@ costs no disk space and no traffic. `--json` prints everything known about the
 message: chat, sender, date, caption, media type, size, duration, and whether the
 file came from the cache, a local copy or the network.
 
-**This is still read-only.** Downloading is a read; no tool that writes to
-Telegram exists here. `download` is a CLI command and is deliberately not exposed
-as an MCP tool — the assistant reads chats, the human fetches files.
+**This is still read-only.** Fetching a file is a read either way: the `download`
+command serves the human at the terminal, `get_message_media` serves the model,
+and both go through the same allowlist check before anything touches the network.
 
 ## Configuration
 
@@ -180,6 +184,7 @@ as an MCP tool — the assistant reads chats, the human fetches files.
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | credentials from <https://my.telegram.org/apps> |
 | `TELEGRAM_SESSION_STRING` | Telethon `StringSession`, issued by `telegram-mcp login` |
 | `TG_ALLOWED_CHATS_FILE` | path to the allowlist; default `~/.config/telegram-mcp/allowed_chats.json` (`$XDG_CONFIG_HOME` is honoured) |
+| `TG_MEDIA_DIR` | where `get_message_media` keeps downloaded files; default `~/.cache/telegram-mcp/media` (`$XDG_CACHE_HOME` is honoured) |
 
 Every command also accepts `--allowlist PATH`. Editing the allowlist takes effect when the
 MCP client restarts the server.

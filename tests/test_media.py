@@ -7,8 +7,14 @@ from unittest import mock
 
 import pytest
 
-from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed
-from telegram_mcp.media import canonical_name, download_message_media, find_local_copy, link_or_copy
+from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed, MediaTooLarge
+from telegram_mcp.media import (
+    canonical_name,
+    download_message_media,
+    find_local_copy,
+    inline_verdict,
+    link_or_copy,
+)
 
 
 def write(path, size, mtime=None):
@@ -101,6 +107,30 @@ class TestFindLocalCopy:
         # Test that ext="mp4" (without dot) matches ".mp4" files, like canonical_name does
         target = write(tmp_path / "video.mp4", 4096)
         assert find_local_copy([tmp_path], size=4096, ext="mp4") == target
+
+    def test_relative_traversal_in_filename_cannot_escape_the_search_dir(self, tmp_path):
+        search_dir = tmp_path / "search"
+        search_dir.mkdir()
+        # One level above search_dir — reachable from it by "../outside.mov" if
+        # the traversal were not stripped.
+        write(tmp_path / "outside.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename="../outside.mov") is None
+
+    def test_relative_traversal_in_filename_still_matches_the_final_component(self, tmp_path, monkeypatch):
+        # The floor goes back up for this one test, above the file's size: with
+        # the size-only fallback out of the way, only the filename branch can
+        # produce an answer, so the assertion actually distinguishes a stripped
+        # traversal from a missed match.
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 1_000_000)
+        search_dir = tmp_path / "search"
+        target = write(search_dir / "outside.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename="../../outside.mov") == target
+
+    def test_absolute_filename_cannot_escape_the_search_dir(self, tmp_path):
+        search_dir = tmp_path / "search"
+        search_dir.mkdir()
+        elsewhere = write(tmp_path / "elsewhere" / "secret.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename=str(elsewhere)) is None
 
 
 class TestFindLocalCopySizeFloor:
@@ -225,10 +255,17 @@ def allowlist():
     return AllowList([TEAM])
 
 
-def run(client, chat, out_dir, lookup_dirs=(), message_id=4242, progress_callback=None):
+def run(client, chat, out_dir, lookup_dirs=(), message_id=4242, progress_callback=None, max_size=None):
     return asyncio.run(
         download_message_media(
-            client, allowlist(), chat, message_id, out_dir, lookup_dirs, progress_callback=progress_callback
+            client,
+            allowlist(),
+            chat,
+            message_id,
+            out_dir,
+            lookup_dirs,
+            progress_callback=progress_callback,
+            max_size=max_size,
         )
     )
 
@@ -253,6 +290,19 @@ class TestDownloadMessageMedia:
         assert result["source"] == "local"
         assert result["origin"] == str(downloads / "Screen Recording.mov")
         assert ("download_media", str(tmp_path / "cache" / "team-4242.mov")) not in client.calls
+
+    def test_local_lookup_uses_the_raw_name_but_returns_the_sanitised_one(self, tmp_path):
+        # The real file on disk carries the zero-width space in its name, just
+        # like the uploader named it. Matching it needs the raw name; what the
+        # caller is told about it must be scrubbed, exactly like message text.
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        raw_name = "Screen​ Recording.mov"
+        (downloads / raw_name).write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name=raw_name, ext=".mov")))
+        result = run(client, "team", tmp_path / "cache", [downloads])
+        assert result["source"] == "local"
+        assert result["file_name"] == "Screen Recording.mov"
 
     def test_existing_file_of_the_right_size_is_reused(self, tmp_path):
         (tmp_path / "team-4242.mp4").write_bytes(b"x" * 11)
@@ -302,3 +352,100 @@ class TestDownloadMessageMedia:
         )
         assert result["source"] == "local"
         assert client.last_progress_callback == "not-called"
+
+    def test_result_reports_the_mime_type(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        assert run(client, "team", tmp_path)["mime"] == "video/mp4"
+
+
+class TestMaxSize:
+    def test_refuses_a_network_download_above_the_limit(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100)))
+        with pytest.raises(MediaTooLarge, match="max_size"):
+            run(client, "team", tmp_path, max_size=99)
+        assert not any(call[0] == "download_media" for call in client.calls)
+
+    def test_downloads_at_the_limit(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100)), payload=b"x" * 100)
+        assert run(client, "team", tmp_path, max_size=100)["source"] == "network"
+
+    def test_no_limit_by_default(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        assert run(client, "team", tmp_path)["source"] == "network"
+
+    def test_cached_file_ignores_the_limit(self, tmp_path):
+        (tmp_path / "team-4242.mp4").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        # Already on disk: the limit guards the network, not the cache.
+        assert run(client, "team", tmp_path, max_size=1)["source"] == "cache"
+
+    def test_local_copy_ignores_the_limit(self, tmp_path):
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        (downloads / "Screen Recording.mov").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name="Screen Recording.mov", ext=".mov")))
+        # A hard link from the desktop client costs nothing, whatever the size.
+        result = run(client, "team", tmp_path / "cache", [downloads], max_size=1)
+        assert result["source"] == "local"
+
+    def test_the_refusal_names_the_file_and_both_sizes(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100, name="huge.mp4")))
+        with pytest.raises(MediaTooLarge) as excinfo:
+            run(client, "team", tmp_path, max_size=99)
+        message = str(excinfo.value)
+        assert "huge.mp4" in message and "100" in message and "99" in message
+
+    def test_default_limit_is_defensible(self):
+        from telegram_mcp.media import DEFAULT_MAX_SIZE
+
+        # Comfortably above a screenshot or a document, well below the
+        # multi-hundred-MB videos that belong to the CLI.
+        assert 10_000_000 <= DEFAULT_MAX_SIZE <= 200_000_000
+
+
+class TestInlineVerdict:
+    def test_small_image_rides_along(self):
+        assert inline_verdict("image/png", 148_213) == (True, None)
+
+    def test_large_image_stays_on_disk(self):
+        inlined, reason = inline_verdict("image/png", 9_000_000)
+        assert inlined is False
+        assert "inline limit" in reason and "path" in reason
+
+    def test_document_stays_on_disk(self):
+        inlined, reason = inline_verdict("application/pdf", 1024)
+        assert inlined is False
+        assert "not an image" in reason
+
+    def test_unknown_mime_stays_on_disk(self):
+        inlined, reason = inline_verdict(None, 1024)
+        assert inlined is False
+        assert "not an image" in reason
+
+    def test_unknown_size_stays_on_disk(self):
+        inlined, reason = inline_verdict("image/png", None)
+        assert inlined is False
+        assert "size" in reason
+
+    def test_video_is_not_inlined_even_when_small(self):
+        assert inline_verdict("video/mp4", 1024)[0] is False
+
+    def test_image_type_the_api_cannot_read_stays_on_disk(self):
+        # image/* but not one of the four types the Anthropic API accepts —
+        # inlining it would only fail later, after the download.
+        inlined, reason = inline_verdict("image/heic", 1024)
+        assert inlined is False
+        assert "image/heic" in reason and "path" in reason
+
+    def test_jpeg_png_gif_webp_are_all_inlinable(self):
+        for mime in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+            assert inline_verdict(mime, 1024) == (True, None)
+
+    def test_inline_limit_leaves_headroom_under_the_api_cap(self):
+        from telegram_mcp.media import INLINE_MAX_BYTES
+
+        # The API caps a single image at five megabytes. The limit is on the
+        # raw byte size, but the image actually travels as base64, which
+        # inflates it by a third — so it is the *encoded* size that has to
+        # stay under the cap.
+        assert INLINE_MAX_BYTES * 4 / 3 <= 5_000_000

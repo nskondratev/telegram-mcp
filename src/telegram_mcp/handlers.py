@@ -49,6 +49,33 @@ def _media_type(message) -> str | None:
     return name[len("MessageMedia") :] if name.startswith("MessageMedia") else name
 
 
+def file_info(message) -> dict | None:
+    """What is worth knowing about an attachment before deciding to fetch it.
+
+    None when the message carries no file at all: an empty object here would
+    read as "a file nothing is known about", which is a different thing.
+
+    ``name`` and ``mime`` are uploader-controlled free-form strings, exactly
+    like a message text, so they are sanitised the same way before reaching
+    the model.
+    """
+    file = getattr(message, "file", None)
+    if file is None:
+        return None
+    name = getattr(file, "name", None)
+    mime = getattr(file, "mime_type", None)
+    return {
+        "size": getattr(file, "size", None),
+        # Absent stays absent. A photo carries no file name at all, and sanitising
+        # None into "" would claim it carries an empty one — the same distinction
+        # this function makes between no file and a file nothing is known about.
+        "name": sanitize_text(name, limit=200) if name else None,
+        "ext": getattr(file, "ext", None) or "",
+        "mime": sanitize_text(mime, limit=200) if mime else None,
+        "duration": getattr(file, "duration", None),
+    }
+
+
 def _message_to_dict(message) -> dict:
     date = getattr(message, "date", None)
     return {
@@ -59,6 +86,7 @@ def _message_to_dict(message) -> dict:
         "text": sanitize_text(getattr(message, "text", None) or getattr(message, "message", None)),
         "reply_to": getattr(message, "reply_to_msg_id", None),
         "media": _media_type(message),
+        "file": file_info(message),
     }
 
 

@@ -1,11 +1,14 @@
 """Tests for the allowlist and text sanitising — the heart of the server."""
 import json
+from pathlib import Path
 
 import pytest
 
 from telegram_mcp.core import (
     ChatNotAllowed,
+    MediaTooLarge,
     default_allowlist_path,
+    default_media_dir,
     load_allowlist,
     normalize_chat_id,
     sanitize_text,
@@ -156,3 +159,31 @@ class TestSanitizeText:
 
     def test_handles_none(self):
         assert sanitize_text(None) == ""
+
+
+class TestDefaultMediaDir:
+    def test_environment_variable_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TG_MEDIA_DIR", str(tmp_path / "elsewhere"))
+        assert default_media_dir() == tmp_path / "elsewhere"
+
+    def test_expands_a_tilde_in_the_environment_variable(self, monkeypatch):
+        monkeypatch.setenv("TG_MEDIA_DIR", "~/tg-media")
+        assert default_media_dir() == Path.home() / "tg-media"
+
+    def test_honours_xdg_cache_home(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("TG_MEDIA_DIR", raising=False)
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        assert default_media_dir() == tmp_path / "telegram-mcp" / "media"
+
+    def test_falls_back_to_the_home_cache(self, monkeypatch):
+        monkeypatch.delenv("TG_MEDIA_DIR", raising=False)
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        assert default_media_dir() == Path.home() / ".cache" / "telegram-mcp" / "media"
+
+
+class TestMediaTooLarge:
+    def test_is_not_an_os_error(self):
+        # An OSError refusal is mistaken for a broken pipe by the stdio
+        # transport and the client gets no answer at all — the same reason
+        # ChatNotAllowed derives from Exception.
+        assert not issubclass(MediaTooLarge, OSError)

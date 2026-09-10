@@ -24,3 +24,6 @@ uv.lock
 # Superpowers scratch space (previously excluded only via the local,
 # unversioned .git/info/exclude — a fresh clone needs this too)
 .superpowers/
+
+# Isolated worktrees for feature work
+.worktrees/

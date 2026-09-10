@@ -13,8 +13,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .core import AllowList, sanitize_text
-from .handlers import _display_name, _entity_of, _media_type
+from .core import AllowList, MediaTooLarge, sanitize_text
+from .handlers import _display_name, _entity_of, _media_type, file_info
 
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
 DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Desktop")
@@ -28,7 +28,47 @@ DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Deskto
 #: actually worth fetching this way. Filename matching is not affected by it.
 MIN_SIZE_FOR_SIZE_ONLY_FALLBACK = 20_000_000  # bytes
 
+#: Default ceiling for pulling a file over the network on the model's behalf.
+#: Screenshots and documents are far below it; a long screen recording is above,
+#: and fetching one is a decision worth making explicitly.
+DEFAULT_MAX_SIZE = 50_000_000  # bytes
+
+#: An image above this size is not worth pushing through the model's context:
+#: the API caps a single picture at five megabytes, and a screenshot is rarely
+#: over one. Bigger pictures still land on disk and can be opened from there.
+#: This limit is on the *raw* byte size, not the base64 form the image actually
+#: travels as: base64 inflates it by a third on the wire, so 4,000,000 raw bytes
+#: would already be at the five-megabyte cap once encoded, leaving no margin.
+INLINE_MAX_BYTES = 3_500_000  # bytes
+
+#: The only image types the Anthropic API actually accepts inline. Telethon (via
+#: the host's mime database) reports plenty of other `image/*` subtypes — heic,
+#: svg+xml, bmp, avif — and inlining one of those would only fail after the
+#: download, once the SDK tries to send it. Anything not in this set stays on
+#: disk, same as a non-image.
+INLINABLE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def inline_verdict(mime, size) -> tuple[bool, str | None]:
+    """Whether the downloaded file should ride along as a picture in the answer.
+
+    Returns the verdict and, when it is negative, the reason in a form the model
+    can act on — everything not inlined is still on disk at the returned path.
+    """
+    if not mime or not str(mime).startswith("image/"):
+        return False, f"not an image (mime: {mime or 'unknown'}) — read it from path"
+    if str(mime) not in INLINABLE_MIME_TYPES:
+        return False, f"image type {mime} is not one the client can inline — read it from path"
+    if size is None:
+        return False, "size unknown — read it from path"
+    if size > INLINE_MAX_BYTES:
+        return False, (
+            f"image of {size} bytes is above the {INLINE_MAX_BYTES}-byte inline limit — "
+            "read it from path"
+        )
+    return True, None
 
 
 def canonical_name(alias: str, message_id: int, ext: str) -> str:
@@ -46,6 +86,13 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     falls back to an exact byte size, which for a video is unambiguous in
     practice. Several candidates of the same size — the most recent one.
 
+    ``filename`` comes from whoever uploaded the document, so it is trusted only
+    as a single path component: only its final component (``Path(filename).name``)
+    is ever joined to a search directory, and an empty, ``.`` or ``..`` component
+    is ignored outright. Without this, a document named e.g. ``../../.ssh/id_rsa``
+    (or an absolute path, which replaces the base entirely under ``/``) could make
+    the search return a file outside every given directory.
+
     Below ``MIN_SIZE_FOR_SIZE_ONLY_FALLBACK``, the size-only fallback is
     skipped entirely and only a filename match (above) is trusted: voice
     notes and video circles have no filename and so always reach the
@@ -55,13 +102,15 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     bases = [Path(raw).expanduser() for raw in dirs]
 
     if filename:
-        for base in bases:
-            candidate = base / filename
-            try:
-                if candidate.is_file() and candidate.stat().st_size == size:
-                    return candidate
-            except OSError:
-                continue
+        name = Path(filename).name
+        if name not in ("", ".", ".."):
+            for base in bases:
+                candidate = base / name
+                try:
+                    if candidate.is_file() and candidate.stat().st_size == size:
+                        return candidate
+                except OSError:
+                    continue
 
     if size < MIN_SIZE_FOR_SIZE_ONLY_FALLBACK:
         return None
@@ -122,19 +171,6 @@ def link_or_copy(src: Path, dst: Path) -> str:
         raise
 
 
-def _file_meta(message) -> dict:
-    """Size, name, extension and duration of the message's media, if any."""
-    file = getattr(message, "file", None)
-    if file is None:
-        return {}
-    return {
-        "size": getattr(file, "size", None),
-        "name": getattr(file, "name", None),
-        "ext": getattr(file, "ext", None) or "",
-        "duration": getattr(file, "duration", None),
-    }
-
-
 async def download_message_media(
     client,
     allowlist: AllowList,
@@ -143,6 +179,8 @@ async def download_message_media(
     out_dir,
     lookup_dirs=None,
     progress_callback=None,
+    *,
+    max_size: int | None = None,
 ) -> dict:
     """The media file of one message, on disk, plus everything known about it.
 
@@ -152,6 +190,10 @@ async def download_message_media(
     ``progress_callback`` only ever reaches Telethon on the network branch
     below: a cache hit returns before anything is read, and a local copy is
     hard linked (or copied) in one call with nothing to report progress on.
+
+    ``max_size`` caps a *network* download only: a file already in ``out_dir``
+    and a copy hard linked from the desktop client cost nothing and are never
+    refused. ``None`` means no cap at all, which is what the CLI passes.
     """
     entry, entity = await _entity_of(client, allowlist, chat)
     message = await client.get_messages(entity, ids=int(message_id))
@@ -160,7 +202,7 @@ async def download_message_media(
     if message is None:
         raise ValueError(f"Message {message_id} not found in {entry.alias!r}.")
 
-    meta = _file_meta(message)
+    meta = file_info(message) or {}
     size = meta.get("size")
     if not size:
         raise ValueError(
@@ -177,10 +219,17 @@ async def download_message_media(
     if target.is_file() and target.stat().st_size == size:
         source = "cache"
     else:
+        # The raw name, straight off the message, is what has to match a real
+        # file on disk — sanitising it (stripping characters, truncating at
+        # 200) would break that match. `meta["name"]` is sanitised for the
+        # caller; this is the one place the unsanitised value is used, and
+        # only to compare it against local file names, never to build a path
+        # from directly (find_local_copy only ever trusts its final component).
+        raw_name = getattr(getattr(message, "file", None), "name", None)
         local = find_local_copy(
             lookup_dirs if lookup_dirs is not None else DEFAULT_LOOKUP_DIRS,
             size=size,
-            filename=meta.get("name"),
+            filename=raw_name,
             ext=meta.get("ext") or None,
         )
         if local is not None:
@@ -188,6 +237,13 @@ async def download_message_media(
             source = "local"
             origin = str(local)
         else:
+            if max_size is not None and size > max_size:
+                raise MediaTooLarge(
+                    f"Message {message_id} in {entry.alias!r} carries "
+                    f"{meta.get('name') or _media_type(message) or 'a file'} of {size} bytes, "
+                    f"above the max_size limit of {max_size} bytes for a network download. "
+                    "Call again with a bigger max_size if it is worth fetching."
+                )
             await client.download_media(
                 message, file=str(target), progress_callback=progress_callback
             )
@@ -201,6 +257,7 @@ async def download_message_media(
         "sender": _display_name(getattr(message, "sender", None)),
         "caption": sanitize_text(getattr(message, "text", None) or ""),
         "media_type": _media_type(message),
+        "mime": meta.get("mime"),
         "size": size,
         "duration": meta.get("duration"),
         "file_name": meta.get("name"),
