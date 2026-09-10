@@ -116,7 +116,12 @@ class TestFindLocalCopy:
         write(tmp_path / "outside.mov", 4096)
         assert find_local_copy([search_dir], size=4096, filename="../outside.mov") is None
 
-    def test_relative_traversal_in_filename_still_matches_the_final_component(self, tmp_path):
+    def test_relative_traversal_in_filename_still_matches_the_final_component(self, tmp_path, monkeypatch):
+        # The floor goes back up for this one test, above the file's size: with
+        # the size-only fallback out of the way, only the filename branch can
+        # produce an answer, so the assertion actually distinguishes a stripped
+        # traversal from a missed match.
+        monkeypatch.setattr("telegram_mcp.media.MIN_SIZE_FOR_SIZE_ONLY_FALLBACK", 1_000_000)
         search_dir = tmp_path / "search"
         target = write(search_dir / "outside.mov", 4096)
         assert find_local_copy([search_dir], size=4096, filename="../../outside.mov") == target
