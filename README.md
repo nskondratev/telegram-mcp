@@ -207,7 +207,7 @@ refusal path are all covered offline. `tests/test_server_integration.py` additio
 starts the real server over stdio and asserts that a forbidden chat is rejected *before*
 any Telegram credentials are even looked at.
 
-Layout: `core.py` — allowlist and sanitising; `handlers.py` — the six read operations;
+Layout: `core.py` — allowlist and sanitising; `handlers.py` — the five read operations;
 `links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
 media file; `client.py` — a Telethon wrapper that warms the dialog cache; `server.py` — MCP
 tool definitions; `cli.py` — `serve` / `login` / `dialogs` / `check` / `download`.
