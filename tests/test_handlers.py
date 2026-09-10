@@ -282,6 +282,16 @@ class TestAttachmentMetadata:
             "duration": None,
         }
 
+    def test_a_file_without_a_name_reports_no_name_rather_than_an_empty_one(self):
+        # A photo or a voice note carries no DocumentAttributeFilename at all,
+        # and no mime is guaranteed either. Reporting "" would claim an empty
+        # name exists, and would read differently from the sibling size and
+        # duration fields, which stay null.
+        message = FakeMessage(1, "look", file=FakeFile(name=None, mime_type=None))
+        info = handlers.file_info(message)
+        assert info["name"] is None
+        assert info["mime"] is None
+
     def test_read_tools_expose_the_file_field(self):
         message = FakeMessage(7, "look", file=FakeFile())
         assert handlers._message_to_dict(message)["file"]["mime"] == "image/png"

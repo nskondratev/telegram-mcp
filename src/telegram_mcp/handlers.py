@@ -62,11 +62,16 @@ def file_info(message) -> dict | None:
     file = getattr(message, "file", None)
     if file is None:
         return None
+    name = getattr(file, "name", None)
+    mime = getattr(file, "mime_type", None)
     return {
         "size": getattr(file, "size", None),
-        "name": sanitize_text(getattr(file, "name", None), limit=200),
+        # Absent stays absent. A photo carries no file name at all, and sanitising
+        # None into "" would claim it carries an empty one — the same distinction
+        # this function makes between no file and a file nothing is known about.
+        "name": sanitize_text(name, limit=200) if name else None,
         "ext": getattr(file, "ext", None) or "",
-        "mime": sanitize_text(getattr(file, "mime_type", None), limit=200),
+        "mime": sanitize_text(mime, limit=200) if mime else None,
         "duration": getattr(file, "duration", None),
     }
 
