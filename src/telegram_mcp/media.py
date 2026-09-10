@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .core import AllowList, sanitize_text
+from .core import AllowList, MediaTooLarge, sanitize_text
 from .handlers import _display_name, _entity_of, _media_type, file_info
 
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
@@ -27,6 +27,11 @@ DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Deskto
 #: generous bitrate (well under a minute of video), and far below any video
 #: actually worth fetching this way. Filename matching is not affected by it.
 MIN_SIZE_FOR_SIZE_ONLY_FALLBACK = 20_000_000  # bytes
+
+#: Default ceiling for pulling a file over the network on the model's behalf.
+#: Screenshots and documents are far below it; a long screen recording is above,
+#: and fetching one is a decision worth making explicitly.
+DEFAULT_MAX_SIZE = 50_000_000  # bytes
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
@@ -130,6 +135,8 @@ async def download_message_media(
     out_dir,
     lookup_dirs=None,
     progress_callback=None,
+    *,
+    max_size: int | None = None,
 ) -> dict:
     """The media file of one message, on disk, plus everything known about it.
 
@@ -139,6 +146,10 @@ async def download_message_media(
     ``progress_callback`` only ever reaches Telethon on the network branch
     below: a cache hit returns before anything is read, and a local copy is
     hard linked (or copied) in one call with nothing to report progress on.
+
+    ``max_size`` caps a *network* download only: a file already in ``out_dir``
+    and a copy hard linked from the desktop client cost nothing and are never
+    refused. ``None`` means no cap at all, which is what the CLI passes.
     """
     entry, entity = await _entity_of(client, allowlist, chat)
     message = await client.get_messages(entity, ids=int(message_id))
@@ -175,6 +186,13 @@ async def download_message_media(
             source = "local"
             origin = str(local)
         else:
+            if max_size is not None and size > max_size:
+                raise MediaTooLarge(
+                    f"Message {message_id} in {entry.alias!r} carries "
+                    f"{meta.get('name') or _media_type(message) or 'a file'} of {size} bytes, "
+                    f"above the max_size limit of {max_size} bytes for a network download. "
+                    "Call again with a bigger max_size if it is worth fetching."
+                )
             await client.download_media(
                 message, file=str(target), progress_callback=progress_callback
             )

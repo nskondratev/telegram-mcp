@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed
+from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed, MediaTooLarge
 from telegram_mcp.media import canonical_name, download_message_media, find_local_copy, link_or_copy
 
 
@@ -225,10 +225,17 @@ def allowlist():
     return AllowList([TEAM])
 
 
-def run(client, chat, out_dir, lookup_dirs=(), message_id=4242, progress_callback=None):
+def run(client, chat, out_dir, lookup_dirs=(), message_id=4242, progress_callback=None, max_size=None):
     return asyncio.run(
         download_message_media(
-            client, allowlist(), chat, message_id, out_dir, lookup_dirs, progress_callback=progress_callback
+            client,
+            allowlist(),
+            chat,
+            message_id,
+            out_dir,
+            lookup_dirs,
+            progress_callback=progress_callback,
+            max_size=max_size,
         )
     )
 
@@ -306,3 +313,48 @@ class TestDownloadMessageMedia:
     def test_result_reports_the_mime_type(self, tmp_path):
         client = FakeClient(FakeMessage(file=FakeFile(size=11)))
         assert run(client, "team", tmp_path)["mime"] == "video/mp4"
+
+
+class TestMaxSize:
+    def test_refuses_a_network_download_above_the_limit(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100)))
+        with pytest.raises(MediaTooLarge, match="max_size"):
+            run(client, "team", tmp_path, max_size=99)
+        assert not any(call[0] == "download_media" for call in client.calls)
+
+    def test_downloads_at_the_limit(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100)), payload=b"x" * 100)
+        assert run(client, "team", tmp_path, max_size=100)["source"] == "network"
+
+    def test_no_limit_by_default(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        assert run(client, "team", tmp_path)["source"] == "network"
+
+    def test_cached_file_ignores_the_limit(self, tmp_path):
+        (tmp_path / "team-4242.mp4").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        # Already on disk: the limit guards the network, not the cache.
+        assert run(client, "team", tmp_path, max_size=1)["source"] == "cache"
+
+    def test_local_copy_ignores_the_limit(self, tmp_path):
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        (downloads / "Screen Recording.mov").write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name="Screen Recording.mov", ext=".mov")))
+        # A hard link from the desktop client costs nothing, whatever the size.
+        result = run(client, "team", tmp_path / "cache", [downloads], max_size=1)
+        assert result["source"] == "local"
+
+    def test_the_refusal_names_the_file_and_both_sizes(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=100, name="huge.mp4")))
+        with pytest.raises(MediaTooLarge) as excinfo:
+            run(client, "team", tmp_path, max_size=99)
+        message = str(excinfo.value)
+        assert "huge.mp4" in message and "100" in message and "99" in message
+
+    def test_default_limit_is_defensible(self):
+        from telegram_mcp.media import DEFAULT_MAX_SIZE
+
+        # Comfortably above a screenshot or a document, well below the
+        # multi-hundred-MB videos that belong to the CLI.
+        assert 10_000_000 <= DEFAULT_MAX_SIZE <= 200_000_000
