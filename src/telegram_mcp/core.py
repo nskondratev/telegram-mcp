@@ -31,6 +31,16 @@ class ChatNotAllowed(Exception):
     """
 
 
+class NotConfigured(Exception):
+    """The server cannot reach Telegram until the operator fixes its configuration.
+
+    Missing credentials or a revoked session string: anticipated, actionable,
+    and safe to disclose — the variable names are not secret and their values
+    are never printed. Derived from Exception rather than OSError for the same
+    reason as ChatNotAllowed.
+    """
+
+
 def default_allowlist_path() -> Path:
     """Where the allowlist lives unless told otherwise.
 

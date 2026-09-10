@@ -5,7 +5,7 @@ import inspect
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from telegram_mcp.core import ChatNotAllowed
+from telegram_mcp.core import ChatNotAllowed, NotConfigured
 from telegram_mcp.server import _anticipated
 
 
@@ -29,11 +29,22 @@ class TestAnticipated:
     def test_a_crash_is_left_to_the_sdk(self):
         @_anticipated
         async def tool():
-            raise RuntimeError("session string is invalid")
+            raise KeyError("entities")
 
         # Not a refusal: the SDK logs it and tells the model nothing, which is
         # the behaviour we want to keep.
-        with pytest.raises(RuntimeError):
+        with pytest.raises(KeyError):
+            asyncio.run(tool())
+
+    def test_not_configured_reaches_the_model(self):
+        @_anticipated
+        async def tool():
+            raise NotConfigured(
+                "The session string is invalid (revoked or expired) — "
+                "issue a new one with `telegram-mcp login`."
+            )
+
+        with pytest.raises(ToolError, match="telegram-mcp login"):
             asyncio.run(tool())
 
     def test_the_signature_survives_decoration(self):

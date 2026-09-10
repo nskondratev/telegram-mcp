@@ -26,7 +26,7 @@ from telethon.sessions import StringSession
 
 from . import handlers
 from .client import CachedClient
-from .core import AllowList, ChatNotAllowed, default_allowlist_path, load_allowlist
+from .core import AllowList, ChatNotAllowed, NotConfigured, default_allowlist_path, load_allowlist
 
 # Every tool is marked read-only: the server physically cannot write to Telegram.
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
@@ -74,10 +74,7 @@ async def _get_client() -> CachedClient:
         if not value
     ]
     if missing:
-        # A ValueError, not a RuntimeError: it is an ANTICIPATED refusal (see
-        # `_anticipated` below) and its text — which env vars are missing — is
-        # exactly what the caller needs to see, unlike an invalid session below.
-        raise ValueError(
+        raise NotConfigured(
             "Missing environment variables: "
             + ", ".join(missing)
             + ". The session string is issued by `telegram-mcp login`."
@@ -95,7 +92,7 @@ async def _get_client() -> CachedClient:
     )
     await telethon_client.connect()
     if not await telethon_client.is_user_authorized():
-        raise RuntimeError(
+        raise NotConfigured(
             "The session string is invalid (revoked or expired) — "
             "issue a new one with `telegram-mcp login`."
         )
@@ -111,7 +108,7 @@ async def _client_for(chat) -> CachedClient:
 
 
 #: Failures the tools raise on purpose. Everything else is a crash.
-ANTICIPATED = (ChatNotAllowed, ValueError)
+ANTICIPATED = (ChatNotAllowed, NotConfigured, ValueError)
 
 
 def _anticipated(fn):
