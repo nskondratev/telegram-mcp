@@ -35,6 +35,9 @@ that gap is the whole point of this server:
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
   All five tools are annotated `readOnlyHint`.
+- **Fetching a file is still reading.** `get_message_media` downloads an attachment
+  through the same allowlist check, and pictures it hands back are untrusted data
+  like any text: a screenshot can carry what looks like an instruction.
 - **Text is data, not instructions.** Message texts, names and titles are sanitised
   (zero-width characters, bidi overrides, control characters) and truncated, and the tool
   descriptions tell the model to treat them as untrusted input.
@@ -51,6 +54,7 @@ that gap is the whole point of this server:
 | `get_messages` | latest messages, newest first, with paging via `before_id` |
 | `get_message_context` | messages around a given id, to reconstruct a thread |
 | `search_messages` | full-text search in one allowed chat or across all of them |
+| `get_message_media` | the attachment of one message — a picture comes back inline, anything else as a path |
 
 A chat is referenced by its alias (`team`), its exact title, or its id.
 
@@ -180,6 +184,7 @@ as an MCP tool — the assistant reads chats, the human fetches files.
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | credentials from <https://my.telegram.org/apps> |
 | `TELEGRAM_SESSION_STRING` | Telethon `StringSession`, issued by `telegram-mcp login` |
 | `TG_ALLOWED_CHATS_FILE` | path to the allowlist; default `~/.config/telegram-mcp/allowed_chats.json` (`$XDG_CONFIG_HOME` is honoured) |
+| `TG_MEDIA_DIR` | where `get_message_media` keeps downloaded files; default `~/.cache/telegram-mcp/media` (`$XDG_CACHE_HOME` is honoured) |
 
 Every command also accepts `--allowlist PATH`. Editing the allowlist takes effect when the
 MCP client restarts the server.
