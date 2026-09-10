@@ -17,6 +17,9 @@ DEFAULT_TEXT_LIMIT = 4000
 #: Environment variable pointing at the allowlist file.
 ALLOWLIST_ENV = "TG_ALLOWED_CHATS_FILE"
 
+#: Environment variable pointing at the directory downloaded media is kept in.
+MEDIA_DIR_ENV = "TG_MEDIA_DIR"
+
 # Invisible characters: zero-width spaces, bidi overrides, word joiners, BOM.
 # They get stripped — prompt injection uses them to hide instructions in text.
 _INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
@@ -41,6 +44,15 @@ class NotConfigured(Exception):
     """
 
 
+class MediaTooLarge(Exception):
+    """The attachment is bigger than the caller allowed to pull over the network.
+
+    Derived from Exception rather than OSError for the same reason as
+    ChatNotAllowed: the MCP stdio transport mistakes an OSError for a broken
+    pipe, and the client gets no answer at all instead of a clear refusal.
+    """
+
+
 def default_allowlist_path() -> Path:
     """Where the allowlist lives unless told otherwise.
 
@@ -55,6 +67,22 @@ def default_allowlist_path() -> Path:
     config_home = os.environ.get("XDG_CONFIG_HOME")
     base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
     return base / "telegram-mcp" / "allowed_chats.json"
+
+
+def default_media_dir() -> Path:
+    """Where downloaded attachments are kept unless told otherwise.
+
+    ``$TG_MEDIA_DIR`` wins; otherwise ``~/.cache/telegram-mcp/media``
+    (``$XDG_CACHE_HOME`` is honoured). A cache directory and not the config
+    one on purpose: these files are reproducible, and deleting them costs a
+    re-download and nothing else.
+    """
+    from_env = os.environ.get(MEDIA_DIR_ENV)
+    if from_env:
+        return Path(from_env).expanduser()
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    base = Path(cache_home).expanduser() if cache_home else Path.home() / ".cache"
+    return base / "telegram-mcp" / "media"
 
 
 def normalize_chat_id(value) -> int:

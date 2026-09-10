@@ -5,7 +5,7 @@ import inspect
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from telegram_mcp.core import ChatNotAllowed, NotConfigured
+from telegram_mcp.core import ChatNotAllowed, MediaTooLarge, NotConfigured
 from telegram_mcp.server import _anticipated
 
 
@@ -62,3 +62,13 @@ class TestAnticipated:
             return {"chats": []}
 
         assert asyncio.run(tool()) == {"chats": []}
+
+    def test_too_large_keeps_its_hint(self):
+        @_anticipated
+        async def tool():
+            raise MediaTooLarge("above the max_size limit of 50000000 bytes")
+
+        # The hint is the whole point of the refusal: without it the model
+        # cannot know that a bigger max_size would work.
+        with pytest.raises(ToolError, match="max_size"):
+            asyncio.run(tool())

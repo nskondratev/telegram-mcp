@@ -26,7 +26,14 @@ from telethon.sessions import StringSession
 
 from . import handlers
 from .client import CachedClient
-from .core import AllowList, ChatNotAllowed, NotConfigured, default_allowlist_path, load_allowlist
+from .core import (
+    AllowList,
+    ChatNotAllowed,
+    MediaTooLarge,
+    NotConfigured,
+    default_allowlist_path,
+    load_allowlist,
+)
 
 # Every tool is marked read-only: the server physically cannot write to Telegram.
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
@@ -108,7 +115,7 @@ async def _client_for(chat) -> CachedClient:
 
 
 #: Failures the tools raise on purpose. Everything else is a crash.
-ANTICIPATED = (ChatNotAllowed, NotConfigured, ValueError)
+ANTICIPATED = (ChatNotAllowed, MediaTooLarge, NotConfigured, ValueError)
 
 
 def _anticipated(fn):
