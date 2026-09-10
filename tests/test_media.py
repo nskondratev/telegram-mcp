@@ -8,7 +8,13 @@ from unittest import mock
 import pytest
 
 from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed, MediaTooLarge
-from telegram_mcp.media import canonical_name, download_message_media, find_local_copy, link_or_copy
+from telegram_mcp.media import (
+    canonical_name,
+    download_message_media,
+    find_local_copy,
+    inline_verdict,
+    link_or_copy,
+)
 
 
 def write(path, size, mtime=None):
@@ -358,3 +364,37 @@ class TestMaxSize:
         # Comfortably above a screenshot or a document, well below the
         # multi-hundred-MB videos that belong to the CLI.
         assert 10_000_000 <= DEFAULT_MAX_SIZE <= 200_000_000
+
+
+class TestInlineVerdict:
+    def test_small_image_rides_along(self):
+        assert inline_verdict("image/png", 148_213) == (True, None)
+
+    def test_large_image_stays_on_disk(self):
+        inlined, reason = inline_verdict("image/png", 9_000_000)
+        assert inlined is False
+        assert "inline limit" in reason and "path" in reason
+
+    def test_document_stays_on_disk(self):
+        inlined, reason = inline_verdict("application/pdf", 1024)
+        assert inlined is False
+        assert "not an image" in reason
+
+    def test_unknown_mime_stays_on_disk(self):
+        inlined, reason = inline_verdict(None, 1024)
+        assert inlined is False
+        assert "not an image" in reason
+
+    def test_unknown_size_stays_on_disk(self):
+        inlined, reason = inline_verdict("image/png", None)
+        assert inlined is False
+        assert "size" in reason
+
+    def test_video_is_not_inlined_even_when_small(self):
+        assert inline_verdict("video/mp4", 1024)[0] is False
+
+    def test_inline_limit_leaves_headroom_under_the_api_cap(self):
+        from telegram_mcp.media import INLINE_MAX_BYTES
+
+        # The API caps a single image at five megabytes; stay under it.
+        assert INLINE_MAX_BYTES <= 5_000_000

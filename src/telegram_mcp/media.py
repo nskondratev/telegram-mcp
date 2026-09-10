@@ -33,7 +33,30 @@ MIN_SIZE_FOR_SIZE_ONLY_FALLBACK = 20_000_000  # bytes
 #: and fetching one is a decision worth making explicitly.
 DEFAULT_MAX_SIZE = 50_000_000  # bytes
 
+#: An image above this size is not worth pushing through the model's context:
+#: the API caps a single picture at five megabytes, and a screenshot is rarely
+#: over one. Bigger pictures still land on disk and can be opened from there.
+INLINE_MAX_BYTES = 4_000_000  # bytes
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def inline_verdict(mime, size) -> tuple[bool, str | None]:
+    """Whether the downloaded file should ride along as a picture in the answer.
+
+    Returns the verdict and, when it is negative, the reason in a form the model
+    can act on — everything not inlined is still on disk at the returned path.
+    """
+    if not mime or not str(mime).startswith("image/"):
+        return False, f"not an image (mime: {mime or 'unknown'}) — read it from path"
+    if size is None:
+        return False, "size unknown — read it from path"
+    if size > INLINE_MAX_BYTES:
+        return False, (
+            f"image of {size} bytes is above the {INLINE_MAX_BYTES}-byte inline limit — "
+            "read it from path"
+        )
+    return True, None
 
 
 def canonical_name(alias: str, message_id: int, ext: str) -> str:
