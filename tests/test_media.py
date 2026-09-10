@@ -412,6 +412,17 @@ class TestInlineVerdict:
     def test_video_is_not_inlined_even_when_small(self):
         assert inline_verdict("video/mp4", 1024)[0] is False
 
+    def test_image_type_the_api_cannot_read_stays_on_disk(self):
+        # image/* but not one of the four types the Anthropic API accepts —
+        # inlining it would only fail later, after the download.
+        inlined, reason = inline_verdict("image/heic", 1024)
+        assert inlined is False
+        assert "image/heic" in reason and "path" in reason
+
+    def test_jpeg_png_gif_webp_are_all_inlinable(self):
+        for mime in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+            assert inline_verdict(mime, 1024) == (True, None)
+
     def test_inline_limit_leaves_headroom_under_the_api_cap(self):
         from telegram_mcp.media import INLINE_MAX_BYTES
 

@@ -38,6 +38,13 @@ DEFAULT_MAX_SIZE = 50_000_000  # bytes
 #: over one. Bigger pictures still land on disk and can be opened from there.
 INLINE_MAX_BYTES = 4_000_000  # bytes
 
+#: The only image types the Anthropic API actually accepts inline. Telethon (via
+#: the host's mime database) reports plenty of other `image/*` subtypes — heic,
+#: svg+xml, bmp, avif — and inlining one of those would only fail after the
+#: download, once the SDK tries to send it. Anything not in this set stays on
+#: disk, same as a non-image.
+INLINABLE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
@@ -49,6 +56,8 @@ def inline_verdict(mime, size) -> tuple[bool, str | None]:
     """
     if not mime or not str(mime).startswith("image/"):
         return False, f"not an image (mime: {mime or 'unknown'}) — read it from path"
+    if str(mime) not in INLINABLE_MIME_TYPES:
+        return False, f"image type {mime} is not one the client can inline — read it from path"
     if size is None:
         return False, "size unknown — read it from path"
     if size > INLINE_MAX_BYTES:

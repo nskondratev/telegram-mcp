@@ -24,6 +24,18 @@ class TestMediaBlocks:
         assert isinstance(blocks[1], Image)
         assert str(blocks[1].path) == "/tmp/team-1.png"
 
+    def test_image_block_declares_the_mime_the_decision_was_made_on(self, tmp_path):
+        # The path's extension is one the SDK's own extension-to-mime table does
+        # not recognise (Telethon can derive such an extension from the mime via
+        # the host's mime database), so if the mime were guessed from the
+        # extension it would come back as application/octet-stream. Declaring
+        # the subtype explicitly must win regardless.
+        # `to_image_content()` reads the file, so it needs to actually exist.
+        path = tmp_path / "team-1.jfif"
+        path.write_bytes(b"fake-jpeg-bytes")
+        blocks = _media_blocks(result(mime="image/jpeg", path=str(path)))
+        assert blocks[1].to_image_content().mime_type == "image/jpeg"
+
     def test_document_comes_back_as_metadata_only(self):
         blocks = _media_blocks(result(mime="application/pdf", path="/tmp/team-1.pdf"))
         assert len(blocks) == 1

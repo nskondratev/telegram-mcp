@@ -151,7 +151,13 @@ def _media_blocks(result: dict) -> list[dict[str, Any] | Image]:
     result["inline_note"] = reason
     blocks: list[dict[str, Any] | Image] = [result]
     if inlined:
-        blocks.append(Image(path=result["path"]))
+        # Declare the same subtype the inline decision was made on, instead of
+        # letting the SDK guess one from the file extension: Telethon derives
+        # the extension from the mime through the host's mime database, so
+        # even a plain JPEG can end up with an extension the SDK's own
+        # extension-to-mime table does not recognise.
+        subtype = str(result["mime"]).split("/", 1)[1]
+        blocks.append(Image(path=result["path"], format=subtype))
     return blocks
 
 
