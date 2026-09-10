@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from .core import AllowList, sanitize_text
-from .handlers import _display_name, _entity_of, _media_type
+from .handlers import _display_name, _entity_of, _media_type, file_info
 
 #: Where the desktop clients keep downloads. Overridable per call — nothing here is mandatory.
 DEFAULT_LOOKUP_DIRS = ("~/Downloads/Telegram Lite", "~/Downloads/Telegram Desktop")
@@ -122,19 +122,6 @@ def link_or_copy(src: Path, dst: Path) -> str:
         raise
 
 
-def _file_meta(message) -> dict:
-    """Size, name, extension and duration of the message's media, if any."""
-    file = getattr(message, "file", None)
-    if file is None:
-        return {}
-    return {
-        "size": getattr(file, "size", None),
-        "name": getattr(file, "name", None),
-        "ext": getattr(file, "ext", None) or "",
-        "duration": getattr(file, "duration", None),
-    }
-
-
 async def download_message_media(
     client,
     allowlist: AllowList,
@@ -160,7 +147,7 @@ async def download_message_media(
     if message is None:
         raise ValueError(f"Message {message_id} not found in {entry.alias!r}.")
 
-    meta = _file_meta(message)
+    meta = file_info(message) or {}
     size = meta.get("size")
     if not size:
         raise ValueError(
@@ -201,6 +188,7 @@ async def download_message_media(
         "sender": _display_name(getattr(message, "sender", None)),
         "caption": sanitize_text(getattr(message, "text", None) or ""),
         "media_type": _media_type(message),
+        "mime": meta.get("mime"),
         "size": size,
         "duration": meta.get("duration"),
         "file_name": meta.get("name"),

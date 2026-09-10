@@ -302,3 +302,7 @@ class TestDownloadMessageMedia:
         )
         assert result["source"] == "local"
         assert client.last_progress_callback == "not-called"
+
+    def test_result_reports_the_mime_type(self, tmp_path):
+        client = FakeClient(FakeMessage(file=FakeFile(size=11)))
+        assert run(client, "team", tmp_path)["mime"] == "video/mp4"

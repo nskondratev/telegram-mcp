@@ -36,8 +36,17 @@ class FakeSender:
         self.id = id
 
 
+class FakeFile:
+    def __init__(self, size=1024, name="screenshot.png", ext=".png", mime_type="image/png", duration=None):
+        self.size = size
+        self.name = name
+        self.ext = ext
+        self.mime_type = mime_type
+        self.duration = duration
+
+
 class FakeMessage:
-    def __init__(self, id, text, sender=None, reply_to_msg_id=None, date=None):
+    def __init__(self, id, text, sender=None, reply_to_msg_id=None, date=None, file=None):
         self.id = id
         self.text = text
         self.message = text
@@ -45,7 +54,8 @@ class FakeMessage:
         self.sender_id = sender.id if sender else None
         self.reply_to_msg_id = reply_to_msg_id
         self.date = date or dt.datetime(2026, 7, 29, 9, 0, tzinfo=dt.timezone.utc)
-        self.media = None
+        self.media = object() if file else None
+        self.file = file
 
 
 class FakeClient:
@@ -255,3 +265,24 @@ class TestGetMessageContext:
                 handlers.get_message_context(client, allowlist(), PRIVATE_ID, message_id=1, around=2)
             )
         assert client.calls == []
+
+
+class TestAttachmentMetadata:
+    def test_message_without_media_reports_no_file(self):
+        message = FakeMessage(1, "just text")
+        assert handlers.file_info(message) is None
+
+    def test_message_with_media_reports_what_is_worth_fetching(self):
+        message = FakeMessage(1, "look", file=FakeFile(size=148213))
+        assert handlers.file_info(message) == {
+            "size": 148213,
+            "name": "screenshot.png",
+            "ext": ".png",
+            "mime": "image/png",
+            "duration": None,
+        }
+
+    def test_read_tools_expose_the_file_field(self):
+        message = FakeMessage(7, "look", file=FakeFile())
+        assert handlers._message_to_dict(message)["file"]["mime"] == "image/png"
+        assert handlers._message_to_dict(FakeMessage(8, "text"))["file"] is None
