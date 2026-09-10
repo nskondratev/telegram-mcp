@@ -106,7 +106,10 @@ class TestCmdDownloadReportsTheAllowlist:
         async def fake_connected(_session):
             return FakeConnection()
 
-        async def fake_download(*_args, **_kwargs):
+        async def fake_download(*_args, **kwargs):
+            # The CLI must keep downloading with no cap: max_size is the model's
+            # safety valve, not something the human at the terminal should hit.
+            assert kwargs.get("max_size") is None
             return {"path": "/out/team-4242.mp4", "source": "network", "origin": None}
 
         monkeypatch.setattr(cli, "_connected", fake_connected)

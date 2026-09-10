@@ -5,8 +5,9 @@ import inspect
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
+from telegram_mcp import server
 from telegram_mcp.core import ChatNotAllowed, MediaTooLarge, NotConfigured
-from telegram_mcp.server import _anticipated
+from telegram_mcp.server import _anticipated, _get_client
 
 
 class TestAnticipated:
@@ -72,3 +73,16 @@ class TestAnticipated:
         # cannot know that a bigger max_size would work.
         with pytest.raises(ToolError, match="max_size"):
             asyncio.run(tool())
+
+
+class TestGetClientMisconfiguration:
+    def test_raises_not_configured_when_credentials_are_missing(self, monkeypatch):
+        monkeypatch.setattr(server, "_client", None)
+        monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM_API_HASH", raising=False)
+        monkeypatch.delenv("TELEGRAM_SESSION_STRING", raising=False)
+
+        # The exact type matters: it is what lets `_anticipated` turn this into
+        # a refusal the model can act on, instead of an opaque crash.
+        with pytest.raises(NotConfigured):
+            asyncio.run(_get_client())
