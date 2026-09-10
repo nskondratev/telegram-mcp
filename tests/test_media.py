@@ -439,5 +439,8 @@ class TestInlineVerdict:
     def test_inline_limit_leaves_headroom_under_the_api_cap(self):
         from telegram_mcp.media import INLINE_MAX_BYTES
 
-        # The API caps a single image at five megabytes; stay under it.
-        assert INLINE_MAX_BYTES <= 5_000_000
+        # The API caps a single image at five megabytes. The limit is on the
+        # raw byte size, but the image actually travels as base64, which
+        # inflates it by a third — so it is the *encoded* size that has to
+        # stay under the cap.
+        assert INLINE_MAX_BYTES * 4 / 3 <= 5_000_000

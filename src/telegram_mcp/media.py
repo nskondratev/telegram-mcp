@@ -36,7 +36,10 @@ DEFAULT_MAX_SIZE = 50_000_000  # bytes
 #: An image above this size is not worth pushing through the model's context:
 #: the API caps a single picture at five megabytes, and a screenshot is rarely
 #: over one. Bigger pictures still land on disk and can be opened from there.
-INLINE_MAX_BYTES = 4_000_000  # bytes
+#: This limit is on the *raw* byte size, not the base64 form the image actually
+#: travels as: base64 inflates it by a third on the wire, so 4,000,000 raw bytes
+#: would already be at the five-megabyte cap once encoded, leaving no margin.
+INLINE_MAX_BYTES = 3_500_000  # bytes
 
 #: The only image types the Anthropic API actually accepts inline. Telethon (via
 #: the host's mime database) reports plenty of other `image/*` subtypes — heic,
