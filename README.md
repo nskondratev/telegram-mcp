@@ -22,7 +22,7 @@ that gap is the whole point of this server:
 | Chats reachable | only those in `allowed_chats.json` | every dialog of the account |
 | Write tools | none exist in the code | usually present, sometimes toggled off |
 | Untrusted text | control and zero-width characters stripped, length capped | as-is |
-| Tools exposed | 5 | 40–80 |
+| Tools exposed | 6 | 40–80 |
 
 ## Security model
 
@@ -34,7 +34,7 @@ that gap is the whole point of this server:
 - **The answer is re-checked.** After Telegram resolves an entity, its real id is matched
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
-  All five tools are annotated `readOnlyHint`.
+  All six tools are annotated `readOnlyHint`.
 - **Fetching a file is still reading.** `get_message_media` downloads an attachment
   through the same allowlist check, and pictures it hands back are untrusted data
   like any text: a screenshot can carry what looks like an instruction.
@@ -207,7 +207,7 @@ refusal path are all covered offline. `tests/test_server_integration.py` additio
 starts the real server over stdio and asserts that a forbidden chat is rejected *before*
 any Telegram credentials are even looked at.
 
-Layout: `core.py` — allowlist and sanitising; `handlers.py` — the five read operations;
+Layout: `core.py` — allowlist and sanitising; `handlers.py` — the six read operations;
 `links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
 media file; `client.py` — a Telethon wrapper that warms the dialog cache; `server.py` — MCP
 tool definitions; `cli.py` — `serve` / `login` / `dialogs` / `check` / `download`.
