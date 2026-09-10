@@ -108,6 +108,25 @@ class TestFindLocalCopy:
         target = write(tmp_path / "video.mp4", 4096)
         assert find_local_copy([tmp_path], size=4096, ext="mp4") == target
 
+    def test_relative_traversal_in_filename_cannot_escape_the_search_dir(self, tmp_path):
+        search_dir = tmp_path / "search"
+        search_dir.mkdir()
+        # One level above search_dir — reachable from it by "../outside.mov" if
+        # the traversal were not stripped.
+        write(tmp_path / "outside.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename="../outside.mov") is None
+
+    def test_relative_traversal_in_filename_still_matches_the_final_component(self, tmp_path):
+        search_dir = tmp_path / "search"
+        target = write(search_dir / "outside.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename="../../outside.mov") == target
+
+    def test_absolute_filename_cannot_escape_the_search_dir(self, tmp_path):
+        search_dir = tmp_path / "search"
+        search_dir.mkdir()
+        elsewhere = write(tmp_path / "elsewhere" / "secret.mov", 4096)
+        assert find_local_copy([search_dir], size=4096, filename=str(elsewhere)) is None
+
 
 class TestFindLocalCopySizeFloor:
     """A short voice note or video circle must not be matched by size alone."""

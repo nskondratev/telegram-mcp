@@ -74,6 +74,13 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     falls back to an exact byte size, which for a video is unambiguous in
     practice. Several candidates of the same size — the most recent one.
 
+    ``filename`` comes from whoever uploaded the document, so it is trusted only
+    as a single path component: only its final component (``Path(filename).name``)
+    is ever joined to a search directory, and an empty, ``.`` or ``..`` component
+    is ignored outright. Without this, a document named e.g. ``../../.ssh/id_rsa``
+    (or an absolute path, which replaces the base entirely under ``/``) could make
+    the search return a file outside every given directory.
+
     Below ``MIN_SIZE_FOR_SIZE_ONLY_FALLBACK``, the size-only fallback is
     skipped entirely and only a filename match (above) is trusted: voice
     notes and video circles have no filename and so always reach the
@@ -83,13 +90,15 @@ def find_local_copy(dirs, size: int, filename: str | None = None, ext: str | Non
     bases = [Path(raw).expanduser() for raw in dirs]
 
     if filename:
-        for base in bases:
-            candidate = base / filename
-            try:
-                if candidate.is_file() and candidate.stat().st_size == size:
-                    return candidate
-            except OSError:
-                continue
+        name = Path(filename).name
+        if name not in ("", ".", ".."):
+            for base in bases:
+                candidate = base / name
+                try:
+                    if candidate.is_file() and candidate.stat().st_size == size:
+                        return candidate
+                except OSError:
+                    continue
 
     if size < MIN_SIZE_FOR_SIZE_ONLY_FALLBACK:
         return None
