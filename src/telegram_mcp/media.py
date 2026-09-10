@@ -216,10 +216,17 @@ async def download_message_media(
     if target.is_file() and target.stat().st_size == size:
         source = "cache"
     else:
+        # The raw name, straight off the message, is what has to match a real
+        # file on disk — sanitising it (stripping characters, truncating at
+        # 200) would break that match. `meta["name"]` is sanitised for the
+        # caller; this is the one place the unsanitised value is used, and
+        # only to compare it against local file names, never to build a path
+        # from directly (find_local_copy only ever trusts its final component).
+        raw_name = getattr(getattr(message, "file", None), "name", None)
         local = find_local_copy(
             lookup_dirs if lookup_dirs is not None else DEFAULT_LOOKUP_DIRS,
             size=size,
-            filename=meta.get("name"),
+            filename=raw_name,
             ext=meta.get("ext") or None,
         )
         if local is not None:

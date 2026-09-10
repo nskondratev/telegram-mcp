@@ -54,15 +54,19 @@ def file_info(message) -> dict | None:
 
     None when the message carries no file at all: an empty object here would
     read as "a file nothing is known about", which is a different thing.
+
+    ``name`` and ``mime`` are uploader-controlled free-form strings, exactly
+    like a message text, so they are sanitised the same way before reaching
+    the model.
     """
     file = getattr(message, "file", None)
     if file is None:
         return None
     return {
         "size": getattr(file, "size", None),
-        "name": getattr(file, "name", None),
+        "name": sanitize_text(getattr(file, "name", None), limit=200),
         "ext": getattr(file, "ext", None) or "",
-        "mime": getattr(file, "mime_type", None),
+        "mime": sanitize_text(getattr(file, "mime_type", None), limit=200),
         "duration": getattr(file, "duration", None),
     }
 

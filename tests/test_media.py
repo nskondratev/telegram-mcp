@@ -286,6 +286,19 @@ class TestDownloadMessageMedia:
         assert result["origin"] == str(downloads / "Screen Recording.mov")
         assert ("download_media", str(tmp_path / "cache" / "team-4242.mov")) not in client.calls
 
+    def test_local_lookup_uses_the_raw_name_but_returns_the_sanitised_one(self, tmp_path):
+        # The real file on disk carries the zero-width space in its name, just
+        # like the uploader named it. Matching it needs the raw name; what the
+        # caller is told about it must be scrubbed, exactly like message text.
+        downloads = tmp_path / "Telegram Lite"
+        downloads.mkdir()
+        raw_name = "Screen​ Recording.mov"
+        (downloads / raw_name).write_bytes(b"x" * 11)
+        client = FakeClient(FakeMessage(file=FakeFile(size=11, name=raw_name, ext=".mov")))
+        result = run(client, "team", tmp_path / "cache", [downloads])
+        assert result["source"] == "local"
+        assert result["file_name"] == "Screen Recording.mov"
+
     def test_existing_file_of_the_right_size_is_reused(self, tmp_path):
         (tmp_path / "team-4242.mp4").write_bytes(b"x" * 11)
         client = FakeClient(FakeMessage(file=FakeFile(size=11)))
