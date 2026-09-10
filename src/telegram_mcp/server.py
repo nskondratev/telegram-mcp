@@ -147,17 +147,16 @@ def _media_blocks(result: dict) -> list[dict[str, Any] | Image]:
     SDK renders a dict as JSON text and an Image as a picture the model sees.
     """
     inlined, reason = media.inline_verdict(result.get("mime"), result.get("size"))
-    result["inlined"] = inlined
-    result["inline_note"] = reason
-    blocks: list[dict[str, Any] | Image] = [result]
+    answer = {**result, "inlined": inlined, "inline_note": reason}
+    blocks: list[dict[str, Any] | Image] = [answer]
     if inlined:
         # Declare the same subtype the inline decision was made on, instead of
         # letting the SDK guess one from the file extension: Telethon derives
         # the extension from the mime through the host's mime database, so
         # even a plain JPEG can end up with an extension the SDK's own
         # extension-to-mime table does not recognise.
-        subtype = str(result["mime"]).split("/", 1)[1]
-        blocks.append(Image(path=result["path"], format=subtype))
+        subtype = str(answer["mime"]).split("/", 1)[1]
+        blocks.append(Image(path=answer["path"], format=subtype))
     return blocks
 
 

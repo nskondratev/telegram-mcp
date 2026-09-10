@@ -46,3 +46,9 @@ class TestMediaBlocks:
         blocks = _media_blocks(result(size=9_000_000))
         assert len(blocks) == 1
         assert "inline limit" in blocks[0]["inline_note"]
+
+    def test_does_not_mutate_the_caller_s_dict(self):
+        original = result()
+        _media_blocks(original)
+        assert "inlined" not in original
+        assert "inline_note" not in original
