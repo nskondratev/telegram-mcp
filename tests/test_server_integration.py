@@ -13,7 +13,7 @@ FORBIDDEN_CHAT = "-1001234567890"
 ALLOWED_CHAT_ID = -1005555555555
 
 
-def rpc(method, params, allowlist_path, timeout=180):
+def rpc(method, params, allowlist_path, timeout=180, local_path=None):
     requests = [
         {
             "jsonrpc": "2.0",
@@ -32,6 +32,8 @@ def rpc(method, params, allowlist_path, timeout=180):
     # without them, and must ask for them as soon as a chat is allowed.
     env = {k: v for k, v in os.environ.items() if not k.startswith("TELEGRAM_")}
     env["TG_ALLOWED_CHATS_FILE"] = str(allowlist_path)
+    # Never pick up the personal additions of whoever runs the tests.
+    env["TG_ALLOWED_CHATS_LOCAL_FILE"] = str(local_path or allowlist_path.parent / "absent.local.json")
     proc = subprocess.Popen(
         [sys.executable, "-m", "telegram_mcp", "serve"],
         stdin=subprocess.PIPE,
@@ -57,8 +59,8 @@ def rpc(method, params, allowlist_path, timeout=180):
         proc.wait(timeout=timeout)
 
 
-def call_tool(name, arguments, allowlist_path, timeout=180):
-    return rpc("tools/call", {"name": name, "arguments": arguments}, allowlist_path, timeout)
+def call_tool(name, arguments, allowlist_path, timeout=180, local_path=None):
+    return rpc("tools/call", {"name": name, "arguments": arguments}, allowlist_path, timeout, local_path)
 
 
 def write_allowlist(tmp_path):
@@ -102,6 +104,37 @@ def test_media_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
         "get_message_media",
         {"chat": FORBIDDEN_CHAT, "message_id": 1},
         write_allowlist(tmp_path),
+    )
+    text = json.dumps(response, ensure_ascii=False)
+    assert "allowlist" in text, text
+    assert "TELEGRAM_API_ID" not in text, "went to Telegram first and checked the allowlist after"
+
+
+def write_local_allowlist(tmp_path):
+    path = tmp_path / "allowed_chats.local.json"
+    path.write_text(
+        json.dumps({"chats": [{"alias": "side", "id": -1006666666666, "title": "Side"}]}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_chat_from_the_personal_additions_reaches_telegram_layer(tmp_path):
+    response = call_tool(
+        "get_messages",
+        {"chat": "side", "limit": 5},
+        write_allowlist(tmp_path),
+        local_path=write_local_allowlist(tmp_path),
+    )
+    assert "TELEGRAM_API_ID" in json.dumps(response, ensure_ascii=False)
+
+
+def test_personal_additions_do_not_open_other_chats(tmp_path):
+    response = call_tool(
+        "get_messages",
+        {"chat": FORBIDDEN_CHAT, "limit": 5},
+        write_allowlist(tmp_path),
+        local_path=write_local_allowlist(tmp_path),
     )
     text = json.dumps(response, ensure_ascii=False)
     assert "allowlist" in text, text

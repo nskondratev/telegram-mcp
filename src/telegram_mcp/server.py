@@ -9,6 +9,8 @@ Environment:
     TELEGRAM_SESSION_STRING              issued by `telegram-mcp login`
     TG_ALLOWED_CHATS_FILE                path to the allowlist
                                          (default: ~/.config/telegram-mcp/allowed_chats.json)
+    TG_ALLOWED_CHATS_LOCAL_FILE          optional personal additions to the allowlist
+                                         (default: ~/.config/telegram-mcp/allowed_chats.local.json)
 
 Run with `telegram-mcp serve` (stdio transport).
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +36,9 @@ from .core import (
     MediaTooLarge,
     NotConfigured,
     default_allowlist_path,
+    default_local_allowlist_path,
     default_media_dir,
-    load_allowlist,
+    load_allowlists,
 )
 
 # Every tool is marked read-only: the server physically cannot write to Telegram.
@@ -52,11 +56,17 @@ _allowlist: AllowList | None = None
 _client: CachedClient | None = None
 
 
-def configure(allowlist_path=None) -> AllowList:
-    """Load the allowlist. Called once before the server starts serving."""
+def configure(allowlist_path=None, local_allowlist_path=None) -> AllowList:
+    """Load the allowlist and the personal additions. Called once before serving.
+
+    A skipped addition is reported on stderr: stdout belongs to the MCP transport.
+    """
     global _allowlist
     path = Path(allowlist_path) if allowlist_path else default_allowlist_path()
-    _allowlist = load_allowlist(path)
+    local = Path(local_allowlist_path) if local_allowlist_path else default_local_allowlist_path()
+    _allowlist, skipped = load_allowlists(path, local)
+    for note in skipped:
+        print(f"telegram-mcp: {local}: {note}, entry skipped", file=sys.stderr)
     return _allowlist
 
 
@@ -257,7 +267,7 @@ async def get_message_media(
     return _media_blocks(result)
 
 
-def serve(allowlist_path=None) -> None:
+def serve(allowlist_path=None, local_allowlist_path=None) -> None:
     """Load the allowlist and run the MCP server over stdio."""
-    configure(allowlist_path)
+    configure(allowlist_path, local_allowlist_path)
     mcp.run(transport="stdio")

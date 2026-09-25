@@ -17,6 +17,9 @@ DEFAULT_TEXT_LIMIT = 4000
 #: Environment variable pointing at the allowlist file.
 ALLOWLIST_ENV = "TG_ALLOWED_CHATS_FILE"
 
+#: Environment variable pointing at the personal additions to the allowlist.
+LOCAL_ALLOWLIST_ENV = "TG_ALLOWED_CHATS_LOCAL_FILE"
+
 #: Environment variable pointing at the directory downloaded media is kept in.
 MEDIA_DIR_ENV = "TG_MEDIA_DIR"
 
@@ -64,9 +67,28 @@ def default_allowlist_path() -> Path:
     from_env = os.environ.get(ALLOWLIST_ENV)
     if from_env:
         return Path(from_env).expanduser()
+    return _config_dir() / "allowed_chats.json"
+
+
+def default_local_allowlist_path() -> Path:
+    """Where the personal additions to the allowlist live unless told otherwise.
+
+    ``$TG_ALLOWED_CHATS_LOCAL_FILE`` wins; otherwise ``~/.config/telegram-mcp/
+    allowed_chats.local.json`` (``$XDG_CONFIG_HOME`` is honoured). The file is
+    optional. It exists for setups where the main allowlist is shared — shipped
+    inside a team plugin, for instance — and one person needs a few more chats
+    without editing a file that the next update overwrites.
+    """
+    from_env = os.environ.get(LOCAL_ALLOWLIST_ENV)
+    if from_env:
+        return Path(from_env).expanduser()
+    return _config_dir() / "allowed_chats.local.json"
+
+
+def _config_dir() -> Path:
     config_home = os.environ.get("XDG_CONFIG_HOME")
     base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
-    return base / "telegram-mcp" / "allowed_chats.json"
+    return base / "telegram-mcp"
 
 
 def default_media_dir() -> Path:
@@ -115,7 +137,12 @@ class AllowList:
         self.entries = entries
         self._by_id = {entry.id: entry for entry in entries}
         self._by_alias = {entry.alias.casefold(): entry for entry in entries}
-        self._by_title = {entry.title.casefold(): entry for entry in entries if entry.title}
+        # The first entry with a title wins, so a main allowlist entry keeps its title
+        # even when a personal addition happens to carry the same one.
+        self._by_title: dict[str, ChatEntry] = {}
+        for entry in entries:
+            if entry.title:
+                self._by_title.setdefault(entry.title.casefold(), entry)
 
     def resolve(self, ref) -> int:
         """Chat reference (id, alias or exact title) → id from the allowlist."""
@@ -191,6 +218,48 @@ def load_allowlist(path) -> AllowList:
         )
 
     return AllowList(entries)
+
+
+def merge_allowlists(main: AllowList, extra: AllowList) -> tuple[AllowList, list[str]]:
+    """Put ``extra`` on top of ``main``; on a clash the main entry wins.
+
+    A clash is the same id or the same alias (case-insensitive) — exactly what
+    load_allowlist rejects inside one file. Across two files it is not an error:
+    a shared list that later adds a chat someone already had locally must not stop
+    the server from starting. The skipped entries are reported instead.
+    """
+    entries = list(main.entries)
+    ids = {entry.id for entry in entries}
+    aliases = {entry.alias.casefold() for entry in entries}
+    skipped: list[str] = []
+    for entry in extra.entries:
+        if entry.id in ids:
+            skipped.append(f"id {entry.id} ({entry.alias!r}) is already in the main allowlist")
+            continue
+        if entry.alias.casefold() in aliases:
+            skipped.append(f"alias {entry.alias!r} is already taken in the main allowlist")
+            continue
+        entries.append(entry)
+        ids.add(entry.id)
+        aliases.add(entry.alias.casefold())
+    return AllowList(entries), skipped
+
+
+def load_allowlists(path, local_path=None) -> tuple[AllowList, list[str]]:
+    """The main allowlist plus the optional personal additions.
+
+    The main file is required, as before. The local file is read only if it exists,
+    and the same strict rules apply inside it: a duplicate alias or id is a startup
+    error. Returns the merged list and a note for every addition that was skipped
+    because it clashes with the main list.
+    """
+    main = load_allowlist(path)
+    if local_path is None:
+        return main, []
+    local_path = Path(local_path)
+    if not local_path.exists() or local_path.resolve() == Path(path).resolve():
+        return main, []
+    return merge_allowlists(main, load_allowlist(local_path))
 
 
 def sanitize_text(text, limit: int = DEFAULT_TEXT_LIMIT) -> str:
