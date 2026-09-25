@@ -24,7 +24,14 @@ from pathlib import Path
 
 from . import handlers, media
 from .client import CachedClient
-from .core import ALLOWLIST_ENV, default_allowlist_path, load_allowlist
+from .core import (
+    ALLOWLIST_ENV,
+    LOCAL_ALLOWLIST_ENV,
+    default_allowlist_path,
+    default_local_allowlist_path,
+    load_allowlist,
+    load_allowlists,
+)
 from .links import parse_message_link
 
 REPO_URL = "https://github.com/nskondratev/telegram-mcp"
@@ -80,6 +87,12 @@ def resolve_allowlist_path(explicit: str | None) -> Path:
         return Path(explicit).expanduser()
     from_config = read_env(ALLOWLIST_ENV)
     return Path(from_config).expanduser() if from_config else default_allowlist_path()
+
+
+def resolve_local_allowlist_path() -> Path:
+    """Where the personal additions come from: ~/.claude.json, then the default."""
+    from_config = read_env(LOCAL_ALLOWLIST_ENV)
+    return Path(from_config).expanduser() if from_config else default_local_allowlist_path()
 
 
 def resolve_target(target: str, message_id: int | None) -> tuple[int | str, int]:
@@ -171,9 +184,15 @@ async def cmd_dialogs(pattern: str | None, limit: int, as_json: bool, allowlist_
     print(f"\nTotal: {len(rows)}. Copy the ones you need into {allowlist_path}, giving each an alias.")
 
 
-async def cmd_check(allowlist_path: Path) -> None:
-    allowlist = load_allowlist(allowlist_path)
-    print(f"Allowlist: {allowlist_path} — chats: {len(allowlist.entries)}")
+async def cmd_check(allowlist_path: Path, local_path: Path | None = None) -> None:
+    main_count = len(load_allowlist(allowlist_path).entries)
+    allowlist, skipped = load_allowlists(allowlist_path, local_path)
+    print(f"Allowlist: {allowlist_path} — chats: {main_count}")
+    added = len(allowlist.entries) - main_count
+    if added or skipped:
+        print(f"Personal additions: {local_path} — chats: {added}")
+    for note in skipped:
+        print(f"  SKIP {note}")
     if not allowlist.entries:
         raise SystemExit("The list is empty: the server would start, but there would be nothing to read.")
 
@@ -230,8 +249,10 @@ def _stderr_progress(label: str = "download"):
     return report
 
 
-async def cmd_download(target, message_id, out, lookup_dirs, as_json, allowlist_path: Path) -> None:
-    allowlist = load_allowlist(allowlist_path)
+async def cmd_download(
+    target, message_id, out, lookup_dirs, as_json, allowlist_path: Path, local_path: Path | None = None
+) -> None:
+    allowlist, _ = load_allowlists(allowlist_path, local_path)
     chat_ref, msg_id = resolve_target(target, message_id)
 
     client = await _connected(session_string())
@@ -296,11 +317,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
     allowlist_path = resolve_allowlist_path(args.allowlist)
+    local_path = resolve_local_allowlist_path()
 
     if args.command == "serve":
         from .server import serve
 
-        serve(allowlist_path)
+        serve(allowlist_path, local_path)
     elif args.command == "login":
         asyncio.run(cmd_login())
     elif args.command == "dialogs":
@@ -308,11 +330,11 @@ def main(argv=None) -> None:
     elif args.command == "download":
         asyncio.run(
             cmd_download(
-                args.target, args.message, args.out, args.lookup_dirs, args.json, allowlist_path
+                args.target, args.message, args.out, args.lookup_dirs, args.json, allowlist_path, local_path
             )
         )
     else:
-        asyncio.run(cmd_check(allowlist_path))
+        asyncio.run(cmd_check(allowlist_path, local_path))
 
 
 if __name__ == "__main__":

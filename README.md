@@ -26,8 +26,9 @@ that gap is the whole point of this server:
 
 ## Security model
 
-- **Closed list.** `allowed_chats.json` is the single source of truth. Anything not in
-  it is denied — by id, by alias and by title.
+- **Closed list.** `allowed_chats.json` is the single source of truth, together with the
+  optional personal additions in `allowed_chats.local.json`. Anything not in them is
+  denied — by id, by alias and by title.
 - **Denial happens before the network.** Every handler asks the allowlist first, so a
   forbidden chat never becomes a Telegram request. There is a test that asserts exactly
   this over real stdio.
@@ -110,6 +111,31 @@ as the template:
 Duplicate aliases or ids are a startup error, not a warning. `dialogs --json` prints a
 ready-made skeleton you can edit.
 
+#### Personal additions to a shared allowlist
+
+When the allowlist is shared — shipped inside a team plugin, for example, with
+`TG_ALLOWED_CHATS_FILE` pointing into the plugin — editing it by hand is pointless: the
+next update overwrites the file. Put your own chats into
+`~/.config/telegram-mcp/allowed_chats.local.json` instead (`$XDG_CONFIG_HOME` is honoured,
+`TG_ALLOWED_CHATS_LOCAL_FILE` overrides the path). The format is the same:
+
+```json
+{
+  "chats": [
+    { "alias": "side", "id": -1003333333333, "title": "Side project" }
+  ]
+}
+```
+
+- The file is optional: without it nothing changes.
+- The main list wins. An entry whose id or alias (case-insensitive) is already in the
+  main list is skipped and reported on stderr at startup, so an update of the shared list
+  never stops the server from starting. A clashing title keeps pointing at the main entry.
+- Inside the file the usual rules apply: a duplicate alias or id is a startup error.
+- `check` shows how many chats the additions bring and which ones were skipped.
+- The file is yours alone: the server never writes it, and the refusal message does not
+  mention it — the model has no business editing its own allowlist.
+
 ### 3. Connect the server
 
 Claude Code:
@@ -184,10 +210,11 @@ and both go through the same allowlist check before anything touches the network
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | credentials from <https://my.telegram.org/apps> |
 | `TELEGRAM_SESSION_STRING` | Telethon `StringSession`, issued by `telegram-mcp login` |
 | `TG_ALLOWED_CHATS_FILE` | path to the allowlist; default `~/.config/telegram-mcp/allowed_chats.json` (`$XDG_CONFIG_HOME` is honoured) |
+| `TG_ALLOWED_CHATS_LOCAL_FILE` | optional personal additions to the allowlist; default `~/.config/telegram-mcp/allowed_chats.local.json` (`$XDG_CONFIG_HOME` is honoured) |
 | `TG_MEDIA_DIR` | where `get_message_media` keeps downloaded files; default `~/.cache/telegram-mcp/media` (`$XDG_CACHE_HOME` is honoured) |
 
-Every command also accepts `--allowlist PATH`. Editing the allowlist takes effect when the
-MCP client restarts the server.
+Every command also accepts `--allowlist PATH`. Editing the allowlist or the personal
+additions takes effect when the MCP client restarts the server.
 
 For convenience, `login`, `dialogs` and `check` fall back to the `env` block of a Telegram
 MCP server in `~/.claude.json` when the variables are not exported — so they keep working
