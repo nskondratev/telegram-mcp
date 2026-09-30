@@ -79,7 +79,8 @@ yourself, they are never stored. The command prints a session string.
 
 > ⚠️ **The session string grants full access to your Telegram account.** Treat it like a
 > password: never commit it, never paste it into a chat. It lives in your MCP client
-> config (for Claude Code, `~/.claude.json`), which is not in git.
+> config (for Claude Code, `~/.claude.json` or the `env` block of `~/.claude/settings.json`),
+> which is not in git.
 
 ### 2. Build the allowlist
 
@@ -110,6 +111,10 @@ as the template:
 
 Duplicate aliases or ids are a startup error, not a warning. `dialogs --json` prints a
 ready-made skeleton you can edit.
+
+`dialogs` never reads the allowlist, so it works before the file exists — when the main
+list ships inside a plugin, for instance. `check` and `download` do need the list and
+refuse to run without one.
 
 #### Personal additions to a shared allowlist
 
@@ -216,16 +221,48 @@ and both go through the same allowlist check before anything touches the network
 Every command also accepts `--allowlist PATH`. Editing the allowlist or the personal
 additions takes effect when the MCP client restarts the server.
 
-For convenience, `login`, `dialogs` and `check` fall back to the `env` block of a Telegram
-MCP server in `~/.claude.json` when the variables are not exported — so they keep working
-right after the server is wired into Claude Code.
+### Where the command line finds the credentials
+
+`login`, `dialogs`, `check` and `download` look each variable up in this order and use the
+first one that is set:
+
+1. the environment — a plain `export TELEGRAM_API_ID=…`;
+2. the `env` block of Claude Code's user settings, `~/.claude/settings.json` (if
+   `CLAUDE_CONFIG_DIR` is set, Claude Code keeps its settings there instead, so the file is
+   `$CLAUDE_CONFIG_DIR/settings.json`);
+3. the `env` block of a Telegram MCP server in `~/.claude.json` — any server whose name
+   contains `telegram`, which is where `claude mcp add -e …` puts it.
+
+The same lookup finds `TG_ALLOWED_CHATS_FILE` and `TG_ALLOWED_CHATS_LOCAL_FILE`. A missing or
+malformed file is skipped silently, and nothing read from these files is ever printed — except
+the session string that `login` issues, on purpose. The server itself (`serve`) reads its
+credentials from its process environment only; Claude Code fills that from the same `env` blocks.
+
+**Using a Claude Code plugin?** If the server comes from a plugin whose setup has you keep the
+credentials in the `env` block of `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "TELEGRAM_API_ID": "12345",
+    "TELEGRAM_API_HASH": "abcdef0123456789abcdef0123456789",
+    "TELEGRAM_SESSION_STRING": "…"
+  }
+}
+```
+
+then the command line reads that block too, and `telegram-mcp login` and `telegram-mcp dialogs`
+work in a plain terminal with no `export`. Put `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` there
+first, run `login`, and paste the session string it prints as `TELEGRAM_SESSION_STRING`.
+`dialogs` needs no allowlist file, so it runs even when the main list lives inside the plugin and
+`~/.config/telegram-mcp/allowed_chats.json` does not exist.
 
 ## Development
 
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 111 tests, no account or network required
+uv run --extra dev pytest      # 217 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 

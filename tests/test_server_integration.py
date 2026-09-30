@@ -34,6 +34,11 @@ def rpc(method, params, allowlist_path, timeout=180, local_path=None):
     env["TG_ALLOWED_CHATS_FILE"] = str(allowlist_path)
     # Never pick up the personal additions of whoever runs the tests.
     env["TG_ALLOWED_CHATS_LOCAL_FILE"] = str(local_path or allowlist_path.parent / "absent.local.json")
+    # Nor their Claude Code files: the CLI falls back to ~/.claude/settings.json (or
+    # $CLAUDE_CONFIG_DIR/settings.json) and to ~/.claude.json. Point HOME at a directory
+    # that has neither, so that none of them can be the real one.
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env["HOME"] = str(allowlist_path.parent / "home")
     proc = subprocess.Popen(
         [sys.executable, "-m", "telegram_mcp", "serve"],
         stdin=subprocess.PIPE,

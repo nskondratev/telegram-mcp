@@ -98,10 +98,19 @@ async def _get_client() -> CachedClient:
             + ", ".join(missing)
             + ". The session string is issued by `telegram-mcp login`."
         )
+    try:
+        api_id_number = int(api_id)
+    except ValueError:
+        # int() quotes the value, and a ValueError reaches the model as a refusal:
+        # a hand-edited config may well hold the api_hash in this slot.
+        raise NotConfigured(
+            "TELEGRAM_API_ID must be a number — the api_id of your application at "
+            "https://my.telegram.org/apps, not the api_hash."
+        ) from None
 
     telethon_client = TelegramClient(
         StringSession(session),
-        int(api_id),
+        api_id_number,
         api_hash,
         # No update subscription: this server only reads and should not show up as online.
         receive_updates=False,
