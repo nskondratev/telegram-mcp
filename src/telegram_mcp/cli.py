@@ -10,8 +10,9 @@
 your conversations is for your terminal only, the assistant sees allowlisted
 chats and nothing else.
 
-Credentials are read from the environment; failing that, from the env block of a
-Telegram MCP server in ~/.claude.json. They are never printed, except by `login`.
+Credentials are read from the environment; failing that, from the env block of
+Claude Code's ~/.claude/settings.json; failing that, from the env block of a Telegram
+MCP server in ~/.claude.json. They are never printed, except by `login`.
 """
 from __future__ import annotations
 
@@ -36,15 +37,66 @@ from .links import parse_message_link
 
 REPO_URL = "https://github.com/nskondratev/telegram-mcp"
 
+#: Environment variable that moves Claude Code's whole config directory (default ~/.claude).
+CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+
+
+def claude_settings_path() -> Path:
+    """Claude Code's user-level settings file.
+
+    ``~/.claude/settings.json``. When ``$CLAUDE_CONFIG_DIR`` is set Claude Code keeps
+    its settings there instead of in ``~/.claude``, so the file is
+    ``$CLAUDE_CONFIG_DIR/settings.json``.
+    """
+    config_dir = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
+    base = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    return base / "settings.json"
+
+
+def _settings_file_label() -> str:
+    """The settings file as the error messages name it.
+
+    ``~/.claude/settings.json`` in the usual case, the real path once
+    ``$CLAUDE_CONFIG_DIR`` has moved it somewhere else.
+    """
+    if os.environ.get(CLAUDE_CONFIG_DIR_ENV):
+        return str(claude_settings_path())
+    return "~/.claude/settings.json"
+
+
+def _from_claude_settings(name: str) -> str | None:
+    """One entry of the ``env`` block in Claude Code's user settings, or None.
+
+    Anything unusable counts as "not there": a missing or unreadable file, malformed
+    JSON, a document that is not an object, an ``env`` that is not an object, an entry
+    that is not a non-empty string. Only the one entry asked for is looked at.
+    """
+    try:
+        data = json.loads(claude_settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # ValueError covers both bad JSON and bad UTF-8
+        return None
+    env = data.get("env") if isinstance(data, dict) else None
+    value = env.get(name) if isinstance(env, dict) else None
+    return value if isinstance(value, str) and value else None
+
 
 def read_env(name: str) -> str | None:
-    """Environment variable, falling back to a Telegram MCP server in ~/.claude.json.
+    """Environment variable, then the places Claude Code keeps it, first hit wins.
 
-    Claude Code keeps MCP credentials in ~/.claude.json rather than in the shell,
-    so `check` and `dialogs` keep working right after the server is wired up,
-    with no extra exports. Any server whose name mentions "telegram" counts.
+    1. the environment itself;
+    2. the ``env`` block of Claude Code's user settings, ``~/.claude/settings.json``
+       (``$CLAUDE_CONFIG_DIR/settings.json`` if that variable is set) — where a team
+       plugin has you put the credentials;
+    3. the ``env`` block of a Telegram MCP server in ``~/.claude.json`` — what
+       ``claude mcp add -e`` writes. Any server whose name mentions "telegram" counts.
+
+    So `login`, `dialogs` and `check` work in a plain terminal right after the server
+    is wired up, with no extra exports. A missing or malformed file is skipped.
     """
     value = os.environ.get(name)
+    if value:
+        return value
+    value = _from_claude_settings(name)
     if value:
         return value
     config = Path.home() / ".claude.json"
@@ -72,16 +124,25 @@ def credentials() -> tuple[int, str]:
     if not api_id or not api_hash:
         raise SystemExit(
             "TELEGRAM_API_ID / TELEGRAM_API_HASH are not set. Create an application at "
-            "https://my.telegram.org/apps and pass them as environment variables."
+            "https://my.telegram.org/apps and export them as environment variables, "
+            f'or put them in the "env" block of {_settings_file_label()}.'
         )
-    return int(api_id), api_hash
+    try:
+        return int(api_id), api_hash
+    except ValueError:
+        # A bare int() error quotes the value, and a hand-edited file may well have the
+        # api_hash in this slot: the hash must not end up on the screen.
+        raise SystemExit(
+            "TELEGRAM_API_ID must be a number — the api_id of your application at "
+            "https://my.telegram.org/apps, not the api_hash."
+        ) from None
 
 
 def resolve_allowlist_path(explicit: str | None) -> Path:
-    """Where the allowlist comes from: the flag, then ~/.claude.json, then the default.
+    """Where the allowlist comes from: the flag, then read_env, then the default.
 
-    The path lives next to the credentials in the MCP server config, so the CLI
-    commands work right after the server is wired up, with nothing to export.
+    The path is looked up the same way as the credentials, so the CLI commands work
+    right after the server is wired up, with nothing to export.
     """
     if explicit:
         return Path(explicit).expanduser()
@@ -90,7 +151,7 @@ def resolve_allowlist_path(explicit: str | None) -> Path:
 
 
 def resolve_local_allowlist_path() -> Path:
-    """Where the personal additions come from: ~/.claude.json, then the default."""
+    """Where the personal additions come from: read_env, then the default."""
     from_config = read_env(LOCAL_ALLOWLIST_ENV)
     return Path(from_config).expanduser() if from_config else default_local_allowlist_path()
 
@@ -123,7 +184,10 @@ def build_client(session: str | None):
 def session_string() -> str:
     session = read_env("TELEGRAM_SESSION_STRING")
     if not session:
-        raise SystemExit("TELEGRAM_SESSION_STRING is not set — run `telegram-mcp login` first.")
+        raise SystemExit(
+            "TELEGRAM_SESSION_STRING is not set — run `telegram-mcp login` first, then export it "
+            f'or put it in the "env" block of {_settings_file_label()}.'
+        )
     return session
 
 
