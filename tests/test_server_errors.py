@@ -86,3 +86,47 @@ class TestGetClientMisconfiguration:
         # a refusal the model can act on, instead of an opaque crash.
         with pytest.raises(NotConfigured):
             asyncio.run(_get_client())
+
+    # Looks like an api_hash pasted into the api_id slot: the likeliest typo.
+    MISPLACED_HASH = "0123456789abcdef0123456789abcdef"
+
+    def _misplaced_api_id(self, monkeypatch):
+        monkeypatch.setattr(server, "_client", None)
+        monkeypatch.setenv("TELEGRAM_API_ID", self.MISPLACED_HASH)
+        monkeypatch.setenv("TELEGRAM_API_HASH", "fake-api-hash")
+        monkeypatch.setenv("TELEGRAM_SESSION_STRING", "fake-session")
+        # Stand-ins so that nothing but the api_id can fail, and nothing
+        # reaches the network: a fake session string would otherwise be
+        # rejected first, before the api_id is ever read.
+        monkeypatch.setattr(server, "StringSession", lambda string: object())
+
+        def refuse_to_connect(*args, **kwargs):
+            raise AssertionError("must not build a client from a malformed api_id")
+
+        monkeypatch.setattr(server, "TelegramClient", refuse_to_connect)
+
+    def test_non_numeric_api_id_is_not_configured_and_not_echoed(self, monkeypatch):
+        self._misplaced_api_id(monkeypatch)
+
+        with pytest.raises(NotConfigured) as caught:
+            asyncio.run(_get_client())
+        assert "TELEGRAM_API_ID" in str(caught.value)
+        assert self.MISPLACED_HASH not in str(caught.value)
+        # int() quotes the value in its own message: that error must not ride
+        # along as the cause or the displayed context of the refusal.
+        assert caught.value.__cause__ is None
+        assert caught.value.__suppress_context__
+
+    def test_the_refusal_the_model_reads_does_not_carry_the_value(self, monkeypatch):
+        # A bare ValueError is an anticipated refusal, so its text would reach
+        # the model and end up in the conversation transcript.
+        self._misplaced_api_id(monkeypatch)
+
+        @_anticipated
+        async def tool():
+            await _get_client()
+
+        with pytest.raises(ToolError) as caught:
+            asyncio.run(tool())
+        assert "TELEGRAM_API_ID" in str(caught.value)
+        assert self.MISPLACED_HASH not in str(caught.value)
