@@ -1,4 +1,4 @@
-"""Reading Telegram on top of the allowlist: these five operations, reads only.
+"""Reading Telegram on top of the allowlist: these operations, reads only.
 
 Every function asks the allowlist first and only then touches the client, so a
 chat outside the list never reaches the network at all. The client is passed in
@@ -7,10 +7,12 @@ without an account.
 """
 from __future__ import annotations
 
-from .core import AllowList, ChatNotAllowed, sanitize_text
+from .core import AllowList, ChatNotAllowed, sanitize_emoji, sanitize_text
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
+#: Telegram hands out at most this many reactions per page.
+REACTIONS_MAX_LIMIT = 100
 
 
 def _marked_id(entity) -> int | None:
@@ -76,7 +78,118 @@ def file_info(message) -> dict | None:
     }
 
 
-def _message_to_dict(message) -> dict:
+def _reaction_identity(reaction) -> tuple | None:
+    """What tells one reaction from another, or None for an empty one."""
+    emoticon = getattr(reaction, "emoticon", None)
+    if emoticon:
+        return ("emoji", emoticon)
+    document_id = getattr(reaction, "document_id", None)
+    if document_id is not None:
+        return ("custom", document_id)
+    if type(reaction).__name__ == "ReactionPaid":
+        return ("paid",)
+    return None
+
+
+def _reaction_label(reaction, custom_emoji) -> dict | None:
+    """A reaction as the model reads it.
+
+    A custom emoji carries the emoji it stands for, when known, and its id as a
+    string: document ids run past 2**53, and a JavaScript client would round
+    them as numbers.
+    """
+    identity = _reaction_identity(reaction)
+    if identity is None:
+        return None
+    if identity[0] == "emoji":
+        return {"emoji": sanitize_emoji(identity[1])}
+    if identity[0] == "custom":
+        alt = custom_emoji.get(identity[1])
+        return {"emoji": sanitize_emoji(alt) or None, "custom_emoji_id": str(identity[1])}
+    return {"emoji": "⭐", "paid": True}
+
+
+def _reactor(entry, names) -> dict:
+    peer_id = _marked_id(getattr(entry, "peer_id", None))
+    date = getattr(entry, "date", None)
+    return {
+        "id": peer_id,
+        "name": names.get(peer_id),
+        "date": date.isoformat() if date is not None else None,
+    }
+
+
+def reactions_info(message, names=None, custom_emoji=None, reactors=True) -> list[dict] | None:
+    """The reactions on a message: each emoji, its count, and whether one of them is mine.
+
+    None when there are none, for the same reason as file_info. ``by`` lists who
+    reacted, as far as Telegram says in the message itself — usually only the
+    latest few, and nobody at all in a channel. Names are looked up by the
+    caller, see _reactor_names.
+    """
+    reactions = getattr(message, "reactions", None)
+    results = getattr(reactions, "results", None) or []
+    recent = (getattr(reactions, "recent_reactions", None) or []) if reactors else []
+    names = names or {}
+    custom_emoji = custom_emoji or {}
+    items = []
+    for result in results:
+        label = _reaction_label(result.reaction, custom_emoji)
+        if label is None:
+            continue
+        # For a paid reaction Telegram counts Telegram Stars, not people.
+        item = {**label, ("stars" if label.get("paid") else "count"): result.count}
+        if result.chosen_order is not None:
+            item["mine"] = True
+        identity = _reaction_identity(result.reaction)
+        by = [_reactor(r, names) for r in recent if _reaction_identity(r.reaction) == identity]
+        if by:
+            item["by"] = by
+        items.append(item)
+    return items or None
+
+
+def _names_of(entities) -> dict:
+    return {_marked_id(entity): _display_name(entity) or None for entity in entities}
+
+
+async def _reactor_names(client, entity, messages) -> dict:
+    """Names of everyone listed under the reactions of these messages, in one request.
+
+    Best-effort: a failed lookup leaves ids without names, it never fails the read.
+    """
+    message_ids = [
+        m.id for m in messages if getattr(getattr(m, "reactions", None), "recent_reactions", None)
+    ]
+    if not message_ids:
+        return {}
+    try:
+        return _names_of(await client.get_reaction_peers(entity, message_ids))
+    except Exception:
+        return {}
+
+
+async def _custom_emoji_of(client, messages) -> dict:
+    """The emoji behind every custom emoji reaction of these messages, in one request.
+
+    Best-effort, like _reactor_names: without it a custom emoji keeps only its id.
+    """
+    document_ids = []
+    for message in messages:
+        reactions = getattr(message, "reactions", None)
+        for result in getattr(reactions, "results", None) or []:
+            identity = _reaction_identity(result.reaction)
+            if identity is not None and identity[0] == "custom":
+                document_ids.append(identity[1])
+    if not document_ids:
+        return {}
+    try:
+        return await client.get_custom_emoji(document_ids)
+    except Exception:
+        return {}
+
+
+def _message_to_dict(message, names=None, custom_emoji=None) -> dict:
     date = getattr(message, "date", None)
     return {
         "id": getattr(message, "id", None),
@@ -87,15 +200,22 @@ def _message_to_dict(message) -> dict:
         "reply_to": getattr(message, "reply_to_msg_id", None),
         "media": _media_type(message),
         "file": file_info(message),
+        "reactions": reactions_info(message, names, custom_emoji),
     }
 
 
-def _clamp(limit, default: int = DEFAULT_LIMIT) -> int:
+async def _messages_to_dicts(client, entity, messages) -> list[dict]:
+    names = await _reactor_names(client, entity, messages)
+    custom_emoji = await _custom_emoji_of(client, messages)
+    return [_message_to_dict(m, names, custom_emoji) for m in messages]
+
+
+def _clamp(limit, default: int = DEFAULT_LIMIT, maximum: int = MAX_LIMIT) -> int:
     try:
         value = int(limit)
     except (TypeError, ValueError):
         return default
-    return max(1, min(value, MAX_LIMIT))
+    return max(1, min(value, maximum))
 
 
 async def _entity_of(client, allowlist: AllowList, chat):
@@ -149,7 +269,7 @@ async def get_messages(client, allowlist: AllowList, chat, limit=DEFAULT_LIMIT, 
     messages = await client.get_messages(entity, **kwargs)
     return {
         "chat": _chat_ref(entry, entity),
-        "messages": [_message_to_dict(m) for m in messages],
+        "messages": await _messages_to_dicts(client, entity, messages),
     }
 
 
@@ -163,7 +283,7 @@ async def get_message_context(client, allowlist: AllowList, chat, message_id, ar
     return {
         "chat": _chat_ref(entry, entity),
         "target_id": int(message_id),
-        "messages": [_message_to_dict(m) for m in messages],
+        "messages": await _messages_to_dicts(client, entity, messages),
     }
 
 
@@ -183,8 +303,7 @@ async def search_messages(client, allowlist: AllowList, query, chat=None, limit=
         except Exception as exc:
             errors.append({"alias": entry.alias, "error": f"{type(exc).__name__}: {exc}"})
             continue
-        for message in messages:
-            item = _message_to_dict(message)
+        for item in await _messages_to_dicts(client, entity, messages):
             item["chat_alias"] = entry.alias
             item["chat_title"] = _display_name(entity, entry.title)
             found.append(item)
@@ -193,4 +312,64 @@ async def search_messages(client, allowlist: AllowList, query, chat=None, limit=
     result = {"query": sanitize_text(query, limit=200), "messages": found[:limit]}
     if errors:
         result["errors"] = errors
+    return result
+
+
+async def get_message_reactions(
+    client, allowlist: AllowList, chat, message_id, reaction=None, limit=DEFAULT_LIMIT, offset=None
+) -> dict:
+    """Who reacted to one message and with what, a page at a time.
+
+    ``counts`` sums every reaction up; ``reactions`` lists the people behind them,
+    narrowed to one emoji by ``reaction``. ``total`` is how many people match the
+    request, the filter included and paid stars left out, so the list is complete
+    once it holds that many. Telegram hides
+    the list in channels and in chats that choose to: then only counts come back.
+    """
+    message_id = int(message_id)
+    if message_id <= 0:
+        # Telethon reads ids=0 as "no ids at all" and answers with a list of messages.
+        raise ValueError(f"message_id must be a positive message id, got {message_id}.")
+    wanted = (str(reaction).strip() or None) if reaction is not None else None
+    entry, entity = await _entity_of(client, allowlist, chat)
+    message = await client.get_messages(entity, ids=message_id)
+    if message is None:
+        raise ValueError(f"Message {message_id} was not found in {entry.alias!r}.")
+
+    custom_emoji = await _custom_emoji_of(client, [message])
+    counts = reactions_info(message, custom_emoji=custom_emoji, reactors=False) or []
+    result = {
+        "chat": _chat_ref(entry, entity),
+        "message_id": message_id,
+        "counts": counts,
+        "total": sum(
+            item.get("count", 0)
+            for item in counts
+            if wanted is None or wanted in (item["emoji"], item.get("custom_emoji_id"))
+        ),
+        "reactions": [],
+    }
+    if not counts:
+        return result
+    if not getattr(message.reactions, "can_see_list", False):
+        result["note"] = (
+            "Telegram does not disclose who reacted to this message (a channel, or a chat "
+            "that hides the list) — only the counts are known."
+        )
+        return result
+
+    page = await client.get_reactions_list(
+        entity,
+        message_id,
+        reaction=wanted,
+        limit=_clamp(limit, maximum=REACTIONS_MAX_LIMIT),
+        offset=offset or None,
+    )
+    names = _names_of([*page.users, *page.chats])
+    result["total"] = page.count
+    result["reactions"] = [
+        {**_reactor(r, names), **(_reaction_label(r.reaction, custom_emoji) or {})} for r in page.reactions
+    ]
+    if page.next_offset:
+        result["next_offset"] = page.next_offset
     return result

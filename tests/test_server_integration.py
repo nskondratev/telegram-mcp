@@ -100,8 +100,24 @@ def test_media_tool_is_registered_and_read_only(tmp_path):
         "get_message_context",
         "search_messages",
         "get_message_media",
+        "get_message_reactions",
     }
     assert tools["get_message_media"]["annotations"]["readOnlyHint"] is True
+
+
+def test_every_tool_is_read_only(tmp_path):
+    response = rpc("tools/list", {}, write_allowlist(tmp_path))
+    for tool in response["result"]["tools"]:
+        assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+
+
+def test_reactions_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
+    response = call_tool(
+        "get_message_reactions", {"chat": FORBIDDEN_CHAT, "message_id": 1}, write_allowlist(tmp_path)
+    )
+    text = json.dumps(response, ensure_ascii=False)
+    assert "not in the allowlist" in text
+    assert "TELEGRAM_API_ID" not in text
 
 
 def test_media_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
