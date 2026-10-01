@@ -13,6 +13,7 @@ from telegram_mcp.core import (
     load_allowlist,
     load_allowlists,
     normalize_chat_id,
+    sanitize_emoji,
     sanitize_text,
 )
 
@@ -161,6 +162,27 @@ class TestSanitizeText:
 
     def test_handles_none(self):
         assert sanitize_text(None) == ""
+
+
+class TestSanitizeEmoji:
+    def test_keeps_zero_width_joiner_sequences_whole(self):
+        # Both are standard Telegram reactions. sanitize_text strips the joiner
+        # and turns one reaction into two separate emoji.
+        assert sanitize_emoji("\u2764\u200d\U0001f525") == "\u2764\u200d\U0001f525"
+        assert sanitize_emoji("\U0001f468\u200d\U0001f4bb") == "\U0001f468\u200d\U0001f4bb"
+
+    def test_keeps_variation_selectors_and_skin_tones(self):
+        assert sanitize_emoji("\u2764\ufe0f") == "\u2764\ufe0f"
+        assert sanitize_emoji("\U0001f44d\U0001f3fd") == "\U0001f44d\U0001f3fd"
+
+    def test_strips_bidi_overrides_and_other_invisible_characters(self):
+        assert sanitize_emoji("\u202e\U0001f44d\u200b\x00") == "\U0001f44d"
+
+    def test_caps_length(self):
+        assert len(sanitize_emoji("\U0001f44d" * 100)) <= 32
+
+    def test_handles_none(self):
+        assert sanitize_emoji(None) == ""
 
 
 class TestDefaultMediaDir:

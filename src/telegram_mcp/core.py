@@ -273,3 +273,26 @@ def sanitize_text(text, limit: int = DEFAULT_TEXT_LIMIT) -> str:
     if len(text) > limit:
         text = text[:limit] + "…"
     return text
+
+
+#: Glues multi-part emoji together: ❤‍🔥 and 👨‍💻 are standard Telegram reactions.
+_EMOJI_JOINER = "‍"
+
+
+def sanitize_emoji(text, limit: int = 32) -> str:
+    """Clean a reaction emoji: like sanitize_text, except the zero-width joiner survives.
+
+    sanitize_text strips the joiner along with the other invisible characters,
+    which splits one reaction into two unrelated emoji. Everything else that
+    hides or reorders text — bidi overrides, zero-width spaces, control
+    characters — is still stripped.
+    """
+    if not text:
+        return ""
+    cleaned = "".join(
+        ch
+        for ch in str(text)
+        if ch == _EMOJI_JOINER
+        or (not _INVISIBLE.match(ch) and unicodedata.category(ch) not in ("Cc", "Cf"))
+    )
+    return cleaned[:limit]

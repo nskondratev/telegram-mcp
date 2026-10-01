@@ -22,7 +22,7 @@ that gap is the whole point of this server:
 | Chats reachable | only those in `allowed_chats.json` | every dialog of the account |
 | Write tools | none exist in the code | usually present, sometimes toggled off |
 | Untrusted text | control and zero-width characters stripped, length capped | as-is |
-| Tools exposed | 6 | 40–80 |
+| Tools exposed | 7 | 40–80 |
 
 ## Security model
 
@@ -35,13 +35,15 @@ that gap is the whole point of this server:
 - **The answer is re-checked.** After Telegram resolves an entity, its real id is matched
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
-  All six tools are annotated `readOnlyHint`.
+  All seven tools are annotated `readOnlyHint`.
 - **Fetching a file is still reading.** `get_message_media` downloads an attachment
   through the same allowlist check, and pictures it hands back are untrusted data
   like any text: a screenshot can carry what looks like an instruction.
 - **Text is data, not instructions.** Message texts, names, titles and attachment file
   names are sanitised (zero-width characters, bidi overrides, control characters) and
   truncated, and the tool descriptions tell the model to treat them as untrusted input.
+  Reaction emoji go through the same filter, except that the zero-width joiner survives:
+  without it ❤‍🔥 and 👨‍💻 would fall apart into two emoji each.
 - **The allowlist lives outside the installation.** By default it is read from
   `~/.config/telegram-mcp/allowed_chats.json`, so real chat ids never end up next to the
   code — which is what makes running straight from a git URL safe.
@@ -56,8 +58,29 @@ that gap is the whole point of this server:
 | `get_message_context` | messages around a given id, to reconstruct a thread |
 | `search_messages` | full-text search in one allowed chat or across all of them |
 | `get_message_media` | the attachment of one message — a picture comes back inline, anything else as a path |
+| `get_message_reactions` | who reacted to one message and with what, page by page, optionally narrowed to one emoji |
 
 A chat is referenced by its alias (`team`), its exact title, or its id.
+
+Every message that `get_messages`, `get_message_context` and `search_messages` return
+carries a `reactions` field — `null` when there are none:
+
+```json
+"reactions": [
+  {"emoji": "👀", "count": 2, "mine": true, "by": [
+    {"id": 1001, "name": "Alice", "date": "2026-07-29T09:05:00+00:00"}
+  ]},
+  {"emoji": "🔥", "custom_emoji_id": "5000000000000000001", "count": 1}
+]
+```
+
+`mine` marks the reaction you left. `by` is who reacted, as far as the message itself
+tells: Telegram sends only the latest few people, and nobody in a channel, so a `count`
+above the length of `by` means there are more — `get_message_reactions` has the full
+list. A custom emoji carries the emoji it stands for and its id as a string: the ids run
+past 2⁵³, where a JavaScript client would round a number. The counts cost no extra
+request; the names behind `by` and the custom emoji cost one each per call, and a failed
+lookup leaves the ids in place instead of failing the read.
 
 ## Requirements
 
@@ -262,7 +285,7 @@ first, run `login`, and paste the session string it prints as `TELEGRAM_SESSION_
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 217 tests, no account or network required
+uv run --extra dev pytest      # 254 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 
@@ -271,9 +294,10 @@ refusal path are all covered offline. `tests/test_server_integration.py` additio
 starts the real server over stdio and asserts that a forbidden chat is rejected *before*
 any Telegram credentials are even looked at.
 
-Layout: `core.py` — allowlist and sanitising; `handlers.py` — the five read operations;
+Layout: `core.py` — allowlist and sanitising; `handlers.py` — the read operations;
 `links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
-media file; `client.py` — a Telethon wrapper that warms the dialog cache; `server.py` — MCP
+media file; `client.py` — a Telethon wrapper that warms the dialog cache and builds the raw
+reaction requests; `server.py` — MCP
 tool definitions; `cli.py` — `serve` / `login` / `dialogs` / `check` / `download`.
 
 The installable distribution is named `telegram-allowlist-mcp`; the import package and the
