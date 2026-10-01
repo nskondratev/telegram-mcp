@@ -78,9 +78,11 @@ carries a `reactions` field — `null` when there are none:
 tells: Telegram sends only the latest few people, and nobody in a channel, so a `count`
 above the length of `by` means there are more — `get_message_reactions` has the full
 list. A custom emoji carries the emoji it stands for and its id as a string: the ids run
-past 2⁵³, where a JavaScript client would round a number. The counts cost no extra
-request; the names behind `by` and the custom emoji cost one each per call, and a failed
-lookup leaves the ids in place instead of failing the read.
+past 2⁵³, where a JavaScript client would round a number. A paid ⭐ reaction carries
+`stars` instead of `count`, because Telegram counts Telegram Stars there, not people.
+The counts cost no extra request; the names behind `by` and the custom emoji cost one
+request each per chat read, and a failed lookup leaves the ids in place instead of
+failing the read.
 
 ## Requirements
 
@@ -285,7 +287,7 @@ first, run `login`, and paste the session string it prints as `TELEGRAM_SESSION_
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 254 tests, no account or network required
+uv run --extra dev pytest      # 262 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 
@@ -296,9 +298,9 @@ any Telegram credentials are even looked at.
 
 Layout: `core.py` — allowlist and sanitising; `handlers.py` — the read operations;
 `links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
-media file; `client.py` — a Telethon wrapper that warms the dialog cache and builds the raw
-reaction requests; `server.py` — MCP
-tool definitions; `cli.py` — `serve` / `login` / `dialogs` / `check` / `download`.
+media file; `client.py` — a Telethon wrapper that warms the dialog cache and builds the
+raw reaction requests; `server.py` — MCP tool definitions; `cli.py` — `serve` / `login` /
+`dialogs` / `check` / `download`.
 
 The installable distribution is named `telegram-allowlist-mcp`; the import package and the
 command are both `telegram_mcp` / `telegram-mcp`.

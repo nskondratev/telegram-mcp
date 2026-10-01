@@ -137,7 +137,8 @@ def reactions_info(message, names=None, custom_emoji=None, reactors=True) -> lis
         label = _reaction_label(result.reaction, custom_emoji)
         if label is None:
             continue
-        item = {**label, "count": result.count}
+        # For a paid reaction Telegram counts Telegram Stars, not people.
+        item = {**label, ("stars" if label.get("paid") else "count"): result.count}
         if result.chosen_order is not None:
             item["mine"] = True
         identity = _reaction_identity(result.reaction)
@@ -319,13 +320,18 @@ async def get_message_reactions(
 ) -> dict:
     """Who reacted to one message and with what, a page at a time.
 
-    ``counts`` sums the reactions up; ``reactions`` lists the people behind them,
-    narrowed to one emoji by ``reaction``. ``total`` is how many reactions match
-    the request, so the list is complete once it holds that many. Telegram hides
+    ``counts`` sums every reaction up; ``reactions`` lists the people behind them,
+    narrowed to one emoji by ``reaction``. ``total`` is how many people match the
+    request, the filter included and paid stars left out, so the list is complete
+    once it holds that many. Telegram hides
     the list in channels and in chats that choose to: then only counts come back.
     """
-    entry, entity = await _entity_of(client, allowlist, chat)
     message_id = int(message_id)
+    if message_id <= 0:
+        # Telethon reads ids=0 as "no ids at all" and answers with a list of messages.
+        raise ValueError(f"message_id must be a positive message id, got {message_id}.")
+    wanted = (str(reaction).strip() or None) if reaction is not None else None
+    entry, entity = await _entity_of(client, allowlist, chat)
     message = await client.get_messages(entity, ids=message_id)
     if message is None:
         raise ValueError(f"Message {message_id} was not found in {entry.alias!r}.")
@@ -336,7 +342,11 @@ async def get_message_reactions(
         "chat": _chat_ref(entry, entity),
         "message_id": message_id,
         "counts": counts,
-        "total": sum(item["count"] for item in counts),
+        "total": sum(
+            item.get("count", 0)
+            for item in counts
+            if wanted is None or wanted in (item["emoji"], item.get("custom_emoji_id"))
+        ),
         "reactions": [],
     }
     if not counts:
@@ -348,7 +358,6 @@ async def get_message_reactions(
         )
         return result
 
-    wanted = (str(reaction).strip() or None) if reaction is not None else None
     page = await client.get_reactions_list(
         entity,
         message_id,

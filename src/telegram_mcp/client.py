@@ -60,7 +60,7 @@ class CachedClient:
     async def get_reactions_list(self, entity, message_id, reaction, limit, offset):
         """One page of who reacted to a message; ``reaction`` narrows it to one emoji.
 
-        A string of digits is a custom emoji document id, anything else a
+        A string of ASCII digits is a custom emoji document id, anything else a
         standard emoji. Returns Telegram's messages.MessageReactionsList as is.
         """
         from telethon.tl.functions.messages import GetMessageReactionsListRequest  # noqa: PLC0415
@@ -68,8 +68,11 @@ class CachedClient:
 
         if reaction is None:
             wanted = None
-        elif reaction.isdigit():
-            wanted = ReactionCustomEmoji(document_id=int(reaction))
+        elif reaction.isascii() and reaction.isdigit():
+            document_id = int(reaction)
+            if document_id >= 2**63:
+                raise ValueError(f"{reaction!r} is too large for a custom_emoji_id.")
+            wanted = ReactionCustomEmoji(document_id=document_id)
         else:
             wanted = ReactionEmoji(emoticon=reaction)
         return await self._inner(

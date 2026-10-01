@@ -8,8 +8,11 @@ import datetime as dt
 
 import pytest
 from telethon.tl.types import (
+    Channel,
+    ChatPhotoEmpty,
     MessagePeerReaction,
     MessageReactions,
+    PeerChannel,
     PeerUser,
     ReactionCount,
     ReactionCustomEmoji,
@@ -452,9 +455,33 @@ class TestReactionsInMessages:
         client.custom_emoji = None  # the lookup fails
         assert first_reactions(client) == [{"emoji": None, "custom_emoji_id": str(CUSTOM_ID), "count": 2}]
 
-    def test_paid_reaction_is_a_star(self):
-        message = FakeMessage(10, "a", reactions=reactions(ReactionCount(reaction=ReactionPaid(), count=5)))
-        assert first_reactions(client_with(message)) == [{"emoji": "⭐", "paid": True, "count": 5}]
+    def test_paid_reaction_counts_stars_not_people(self):
+        # For a paid reaction Telegram puts the number of Telegram Stars into count.
+        message = FakeMessage(10, "a", reactions=reactions(ReactionCount(reaction=ReactionPaid(), count=500)))
+        assert first_reactions(client_with(message)) == [{"emoji": "⭐", "paid": True, "stars": 500}]
+
+    def test_resolves_the_custom_emoji_of_every_message_in_one_lookup(self):
+        client = client_with(
+            FakeMessage(10, "a", reactions=reactions(count(CUSTOM_ID, 1))),
+            FakeMessage(9, "b", reactions=reactions(count(CUSTOM_ID + 1, 1), count("👍", 1))),
+            custom_emoji={CUSTOM_ID: "🔥"},
+        )
+        asyncio.run(handlers.get_messages(client, allowlist(), "team"))
+        lookups = [c for c in client.calls if c[0] == "get_custom_emoji"]
+        assert lookups == [("get_custom_emoji", [CUSTOM_ID, CUSTOM_ID + 1])]
+
+    def test_a_channel_that_reacted_is_named_by_its_marked_id(self):
+        # Anonymous admins and linked channels react as a channel: PeerChannel(7) and
+        # the Channel entity have to meet on the -100… id, not on the bare 7.
+        entry = MessagePeerReaction(
+            peer_id=PeerChannel(channel_id=7), date=REACTED_AT, reaction=ReactionEmoji(emoticon="👀")
+        )
+        group = Channel(id=7, title="Ops group", photo=ChatPhotoEmpty(), date=None)
+        client = client_with(FakeMessage(10, "a", reactions=reactions(count("👀", 1), recent=[entry])))
+        client.users = {group.id: group}
+        assert first_reactions(client)[0]["by"] == [
+            {"id": -1000000000007, "name": "Ops group", "date": REACTED_AT.isoformat()}
+        ]
 
     def test_joined_emoji_stay_one_reaction(self):
         message = FakeMessage(10, "a", reactions=reactions(count("\u2764\u200d\U0001f525", 1)))
@@ -500,6 +527,15 @@ class TestGetMessageReactions:
                 handlers.get_message_reactions(client_with(card()), allowlist(), "team", message_id=777)
             )
 
+    @pytest.mark.parametrize("message_id", [0, -5])
+    def test_a_message_id_that_cannot_exist_is_a_clear_refusal(self, message_id):
+        # Telethon reads ids=0 as "no ids" and answers with a list of messages,
+        # which would pass for an existing message without reactions.
+        client = client_with(card())
+        with pytest.raises(ValueError, match="message_id"):
+            asyncio.run(handlers.get_message_reactions(client, allowlist(), "team", message_id=message_id))
+        assert not [c for c in client.calls if c[0] == "get_messages"]
+
     def test_a_message_without_reactions_needs_no_list(self):
         client = client_with(card())
         result = asyncio.run(handlers.get_message_reactions(client, allowlist(), "team", message_id=10))
@@ -514,6 +550,20 @@ class TestGetMessageReactions:
         assert result["reactions"] == []
         assert "note" in result
         assert not [c for c in client.calls if c[0] == "get_reactions_list"]
+
+    def test_a_hidden_list_counts_only_what_the_filter_asks_for(self):
+        client = client_with(card(reactions(count("👍", 7), count("🔥", 2), can_see_list=False)))
+        result = asyncio.run(
+            handlers.get_message_reactions(client, allowlist(), "team", message_id=10, reaction="🔥")
+        )
+        assert result["total"] == 2
+        assert len(result["counts"]) == 2
+
+    def test_stars_are_not_people_in_the_total(self):
+        paid = ReactionCount(reaction=ReactionPaid(), count=500)
+        client = client_with(card(reactions(count("👍", 3), paid, can_see_list=False)))
+        result = asyncio.run(handlers.get_message_reactions(client, allowlist(), "team", message_id=10))
+        assert result["total"] == 3
 
     def test_lists_who_reacted_with_names_from_the_same_answer(self):
         page = reactions_page(

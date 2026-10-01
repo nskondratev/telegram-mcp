@@ -184,3 +184,19 @@ class TestGetReactionsList:
             )
         )
         assert inner.requests[0].reaction == ReactionCustomEmoji(document_id=5000000000000000001)
+
+    def test_digits_that_are_not_ascii_are_not_a_custom_emoji_id(self):
+        # "²".isdigit() is true, and int("²") raises.
+        from telethon.tl.types import ReactionEmoji
+
+        inner = RawClient(reactions_page="page")
+        asyncio.run(CachedClient(inner).get_reactions_list("chat", 10, reaction="²", limit=5, offset=None))
+        assert inner.requests[0].reaction == ReactionEmoji(emoticon="²")
+
+    def test_a_custom_emoji_id_beyond_int64_is_a_clear_refusal(self):
+        inner = RawClient(reactions_page="page")
+        with pytest.raises(ValueError, match="custom_emoji_id"):
+            asyncio.run(
+                CachedClient(inner).get_reactions_list("chat", 10, reaction="9" * 20, limit=5, offset=None)
+            )
+        assert inner.requests == []
