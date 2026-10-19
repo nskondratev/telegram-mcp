@@ -62,10 +62,11 @@ def test_delegates_get_messages():
 class RawClient:
     """Answers raw TL requests the way Telethon's ``client(request)`` does."""
 
-    def __init__(self, documents=None, reactions_page=None, updates=None):
+    def __init__(self, documents=None, reactions_page=None, updates=None, peer_dialogs=None):
         self.documents = documents or []
         self.reactions_page = reactions_page
         self.updates = updates
+        self.peer_dialogs = peer_dialogs
         self.requests = []
 
     async def __call__(self, request):
@@ -73,6 +74,7 @@ class RawClient:
             GetCustomEmojiDocumentsRequest,
             GetMessageReactionsListRequest,
             GetMessagesReactionsRequest,
+            GetPeerDialogsRequest,
         )
 
         self.requests.append(request)
@@ -82,6 +84,8 @@ class RawClient:
             return self.reactions_page
         if isinstance(request, GetMessagesReactionsRequest):
             return self.updates
+        if isinstance(request, GetPeerDialogsRequest):
+            return self.peer_dialogs
         raise AssertionError(f"unexpected request {request!r}")
 
 
@@ -200,3 +204,39 @@ class TestGetReactionsList:
                 CachedClient(inner).get_reactions_list("chat", 10, reaction="9" * 20, limit=5, offset=None)
             )
         assert inner.requests == []
+
+
+
+def peer_dialogs(*dialogs):
+    from telethon.tl.types import updates
+    from telethon.tl.types.messages import PeerDialogs
+
+    state = updates.State(pts=0, qts=0, date=None, seq=0, unread_count=0)
+    return PeerDialogs(dialogs=list(dialogs), messages=[], chats=[], users=[], state=state)
+
+
+class TestGetPeerDialogs:
+    def test_asks_for_the_dialogs_of_exactly_these_chats_in_one_request(self):
+        from telethon.tl.types import Dialog, PeerChannel, PeerNotifySettings
+
+        team = Dialog(
+            peer=PeerChannel(channel_id=7),
+            top_message=12,
+            read_inbox_max_id=10,
+            read_outbox_max_id=10,
+            unread_count=2,
+            unread_mentions_count=0,
+            unread_reactions_count=0,
+            unread_poll_votes_count=0,
+            notify_settings=PeerNotifySettings(),
+        )
+        inner = RawClient(peer_dialogs=peer_dialogs(team))
+        result = asyncio.run(CachedClient(inner).get_peer_dialogs(["team", "support"]))
+        assert result == [team]
+        # One look at the dialogs and nothing else: no read acknowledgement rides along.
+        assert len(inner.requests) == 1
+        assert inner.requests[0].peers == ["team", "support"]
+
+    def test_an_answer_without_dialogs_is_an_empty_list(self):
+        inner = RawClient(peer_dialogs=peer_dialogs())
+        assert asyncio.run(CachedClient(inner).get_peer_dialogs(["team"])) == []

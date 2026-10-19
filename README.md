@@ -35,7 +35,8 @@ that gap is the whole point of this server:
 - **The answer is re-checked.** After Telegram resolves an entity, its real id is matched
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
-  All seven tools are annotated `readOnlyHint`.
+  All seven tools are annotated `readOnlyHint`. Reading does not mark anything as read
+  either: unread counts come from `messages.getPeerDialogs`, which only looks.
 - **Fetching a file is still reading.** `get_message_media` downloads an attachment
   through the same allowlist check, and pictures it hands back are untrusted data
   like any text: a screenshot can carry what looks like an instruction.
@@ -52,9 +53,9 @@ that gap is the whole point of this server:
 
 | Tool | What it returns |
 |---|---|
-| `list_chats` | the allowed chats with their current titles — start here |
-| `get_chat_info` | title, `@username`, member count of one allowed chat |
-| `get_messages` | latest messages, newest first, with paging via `before_id` |
+| `list_chats` | the allowed chats with their current titles and unread counts — start here |
+| `get_chat_info` | title, `@username`, member count, unread count and read position of one allowed chat |
+| `get_messages` | latest messages, newest first, with paging via `before_id`; or forwards from an id — `after_id`, `unread_only` — oldest first |
 | `get_message_context` | messages around a given id, to reconstruct a thread |
 | `search_messages` | full-text search in one allowed chat or across all of them |
 | `get_message_media` | the attachment of one message — a picture comes back inline, anything else as a path |
@@ -83,6 +84,31 @@ past 2⁵³, where a JavaScript client would round a number. A paid ⭐ reaction
 The counts cost no extra request; the names behind `by` and the custom emoji cost one
 request each per chat read, and a failed lookup leaves the ids in place instead of
 failing the read.
+
+### Unread messages
+
+`list_chats` and `get_chat_info` tell how much of each chat is unread:
+
+```json
+{"alias": "team", "unread_count": 12, "read_inbox_max_id": 48210}
+```
+
+`read_inbox_max_id` is the id of the last message read — everything after it is unread.
+Both are `null` when Telegram keeps no dialog for the chat (a channel that was never
+joined) or the lookup fails; `list_chats` asks for all chats in one request.
+
+`get_messages` reads forwards as well as back:
+
+- `after_id` — the messages that follow this id, **oldest first**;
+- `unread_only: true` — exactly the unread ones, the messages after `read_inbox_max_id`,
+  oldest first; the answer carries `unread_count` and `read_inbox_max_id` too.
+
+A full forward page carries `next_after_id`; pass it as `after_id`, keeping `unread_only`,
+for the next page, until a page comes back without it. With both `unread_only` and
+`after_id`, reading starts from whichever is further on, so an old `after_id` never brings
+read messages back. `before_id` still works as an upper bound. A chat without a read
+position makes `unread_only` a clear refusal rather than a guess. Nothing is marked as
+read: summarising the unread leaves them unread in your Telegram apps.
 
 ## Requirements
 
@@ -287,7 +313,7 @@ first, run `login`, and paste the session string it prints as `TELEGRAM_SESSION_
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 262 tests, no account or network required
+uv run --extra dev pytest      # 288 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 
@@ -299,7 +325,7 @@ any Telegram credentials are even looked at.
 Layout: `core.py` — allowlist and sanitising; `handlers.py` — the read operations;
 `links.py` — parsing t.me message links; `media.py` — locating and fetching a message's
 media file; `client.py` — a Telethon wrapper that warms the dialog cache and builds the
-raw reaction requests; `server.py` — MCP tool definitions; `cli.py` — `serve` / `login` /
+raw reaction and dialog requests; `server.py` — MCP tool definitions; `cli.py` — `serve` / `login` /
 `dialogs` / `check` / `download`.
 
 The installable distribution is named `telegram-allowlist-mcp`; the import package and the

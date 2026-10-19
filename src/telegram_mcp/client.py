@@ -6,8 +6,8 @@ the cache via ``get_dialogs()`` and retries. The dialogs themselves are never
 returned anywhere — only allowlisted chats ever leave this process.
 
 The second is keeping raw Telegram requests out of the handlers: the reaction
-calls below build TL objects here, so the handlers keep talking to a plain
-interface that a fake can stand in for.
+and dialog calls below build TL objects here, so the handlers keep talking to a
+plain interface that a fake can stand in for.
 """
 from __future__ import annotations
 
@@ -42,6 +42,18 @@ class CachedClient:
 
     async def get_messages(self, entity, **kwargs):
         return await self._inner.get_messages(entity, **kwargs)
+
+    async def get_peer_dialogs(self, entities):
+        """The dialogs of these chats — unread count and read position — in one request.
+
+        messages.getPeerDialogs only reports where the inbox has been read up to:
+        it marks nothing as read. Returns Telegram's dialogs as they are; a chat
+        Telegram keeps no dialog for (a channel that was never joined) is missing.
+        """
+        from telethon.tl.functions.messages import GetPeerDialogsRequest  # noqa: PLC0415
+
+        answer = await self._inner(GetPeerDialogsRequest(peers=list(entities)))
+        return list(getattr(answer, "dialogs", None) or [])
 
     async def get_custom_emoji(self, document_ids) -> dict[int, str]:
         """The emoji each custom emoji stands for, keyed by its document id."""
