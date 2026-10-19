@@ -111,6 +111,23 @@ def test_every_tool_is_read_only(tmp_path):
         assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
 
 
+def test_get_messages_offers_reading_forwards_and_the_unread(tmp_path):
+    response = rpc("tools/list", {}, write_allowlist(tmp_path))
+    tool = next(t for t in response["result"]["tools"] if t["name"] == "get_messages")
+    properties = tool["inputSchema"]["properties"]
+    assert {"before_id", "after_id", "unread_only"} <= set(properties)
+    assert tool["inputSchema"].get("required") == ["chat"]
+
+
+def test_unread_read_rejects_a_forbidden_chat_before_connecting(tmp_path):
+    response = call_tool(
+        "get_messages", {"chat": FORBIDDEN_CHAT, "unread_only": True}, write_allowlist(tmp_path)
+    )
+    text = json.dumps(response, ensure_ascii=False)
+    assert "not in the allowlist" in text
+    assert "TELEGRAM_API_ID" not in text
+
+
 def test_reactions_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
     response = call_tool(
         "get_message_reactions", {"chat": FORBIDDEN_CHAT, "message_id": 1}, write_allowlist(tmp_path)

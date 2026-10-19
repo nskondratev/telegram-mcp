@@ -268,7 +268,9 @@ async def cmd_check(allowlist_path: Path, local_path: Path | None = None) -> Non
             info = await handlers.get_chat_info(cached, allowlist, entry.id)
             messages = await handlers.get_messages(cached, allowlist, entry.id, limit=1)
             last = messages["messages"][0]["date"] if messages["messages"] else "no messages"
-            print(f"  OK   {entry.alias:<16} {info['title']}  (latest: {last})")
+            unread = info.get("unread_count")
+            unread = f", unread: {unread}" if unread is not None else ""
+            print(f"  OK   {entry.alias:<16} {info['title']}  (latest: {last}{unread})")
         except Exception as exc:
             ok = False
             print(f"  FAIL {entry.alias:<16} {type(exc).__name__}: {exc}")

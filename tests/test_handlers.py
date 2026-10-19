@@ -10,9 +10,11 @@ import pytest
 from telethon.tl.types import (
     Channel,
     ChatPhotoEmpty,
+    Dialog,
     MessagePeerReaction,
     MessageReactions,
     PeerChannel,
+    PeerNotifySettings,
     PeerUser,
     ReactionCount,
     ReactionCustomEmoji,
@@ -21,6 +23,7 @@ from telethon.tl.types import (
     User,
 )
 from telethon.tl.types.messages import MessageReactionsList
+from telethon.utils import resolve_id
 
 from telegram_mcp import handlers
 from telegram_mcp.core import AllowList, ChatEntry, ChatNotAllowed
@@ -80,6 +83,8 @@ class FakeClient:
         self.entities = entities or {}
         self.messages = messages or {}
         self.dialogs = dialogs or []
+        #: Chats Telegram refuses a dialog for: a request naming any of them fails as a whole.
+        self.refused_dialogs = set()
         self.users = users or {}
         self.custom_emoji = custom_emoji
         self.pages = pages or {}
@@ -107,6 +112,13 @@ class FakeClient:
         self.calls.append(("get_reactions_list", entity.id, message_id, reaction, limit, offset))
         return self.pages[(entity.id, message_id)]
 
+    async def get_peer_dialogs(self, entities):
+        ids = [entity.id for entity in entities]
+        self.calls.append(("get_peer_dialogs", ids))
+        if self.refused_dialogs & set(ids):
+            raise ValueError("CHANNEL_PRIVATE")
+        return [d for d in self.dialogs if handlers._marked_id(d.peer) in ids]
+
     async def get_messages(self, entity, **kwargs):
         self.calls.append(("get_messages", entity.id, kwargs))
         found = self.messages.get(entity.id, [])
@@ -115,6 +127,11 @@ class FakeClient:
         search = kwargs.get("search")
         if search:
             found = [m for m in found if search.lower() in (m.text or "").lower()]
+        # Like Telethon: both bounds are exclusive, and reverse=True walks from the oldest up.
+        low, high = kwargs.get("min_id") or 0, kwargs.get("max_id") or float("inf")
+        found = [m for m in found if low < m.id < high]
+        if kwargs.get("reverse"):
+            found = sorted(found, key=lambda m: m.id)
         limit = kwargs.get("limit")
         return found[:limit] if limit else found
 
@@ -613,3 +630,176 @@ class TestGetMessageReactions:
         result = asyncio.run(handlers.get_message_reactions(client, allowlist(), "team", message_id=10))
         assert result["reactions"][0]["emoji"] == "🔥"
         assert result["reactions"][0]["custom_emoji_id"] == str(CUSTOM_ID)
+
+
+def dialog(chat_id, unread, read_up_to):
+    """Telegram's dialog of a chat: how much is unread and where reading stopped."""
+    real_id, peer_type = resolve_id(chat_id)
+    return Dialog(
+        peer=peer_type(real_id),
+        top_message=read_up_to + unread,
+        read_inbox_max_id=read_up_to,
+        read_outbox_max_id=read_up_to,
+        unread_count=unread,
+        unread_mentions_count=0,
+        unread_reactions_count=0,
+        unread_poll_votes_count=0,
+        notify_settings=PeerNotifySettings(),
+    )
+
+
+def unread_client(*ids, read_up_to, unread=None):
+    """The team chat holding messages with these ids, read up to ``read_up_to``."""
+    client = work_client()
+    client.messages[TEAM.id] = [FakeMessage(i, f"message {i}") for i in sorted(ids, reverse=True)]
+    unread = len([i for i in ids if i > read_up_to]) if unread is None else unread
+    client.dialogs = [dialog(TEAM.id, unread, read_up_to), dialog(SUPPORT.id, 0, 5)]
+    return client
+
+
+def read(client, **kwargs):
+    return asyncio.run(handlers.get_messages(client, allowlist(), "team", **kwargs))
+
+
+class TestReadStateInChatInfo:
+    def test_chat_info_tells_how_much_is_unread_and_where_reading_stopped(self):
+        client = unread_client(8, 9, 10, read_up_to=8)
+        result = asyncio.run(handlers.get_chat_info(client, allowlist(), "team"))
+        assert (result["unread_count"], result["read_inbox_max_id"]) == (2, 8)
+
+    def test_a_chat_without_a_dialog_has_no_read_state_rather_than_a_made_up_one(self):
+        client = unread_client(10, read_up_to=8)
+        client.dialogs = []  # a public channel that was never joined
+        result = asyncio.run(handlers.get_chat_info(client, allowlist(), "team"))
+        assert (result["unread_count"], result["read_inbox_max_id"]) == (None, None)
+        assert result["title"] == "Team chat"
+
+    def test_a_failed_lookup_does_not_fail_the_chat_info(self):
+        client = unread_client(10, read_up_to=8)
+        client.refused_dialogs = {TEAM.id}
+        result = asyncio.run(handlers.get_chat_info(client, allowlist(), "team"))
+        assert (result["unread_count"], result["read_inbox_max_id"]) == (None, None)
+        assert result["username"] == "team_chat"
+
+    def test_list_chats_reports_every_chat_s_read_state_in_one_request(self):
+        client = unread_client(8, 9, 10, read_up_to=8)
+        result = asyncio.run(handlers.list_chats(client, allowlist()))
+        state = {c["alias"]: (c["unread_count"], c["read_inbox_max_id"]) for c in result["chats"]}
+        assert state == {"team": (2, 8), "support": (0, 5)}
+        assert [c for c in client.calls if c[0] == "get_peer_dialogs"] == [
+            ("get_peer_dialogs", [TEAM.id, SUPPORT.id])
+        ]
+
+    def test_one_refused_chat_does_not_blank_the_others(self):
+        client = unread_client(8, 9, 10, read_up_to=8)
+        client.refused_dialogs = {SUPPORT.id}
+        result = asyncio.run(handlers.list_chats(client, allowlist()))
+        state = {c["alias"]: (c["unread_count"], c["read_inbox_max_id"]) for c in result["chats"]}
+        assert state == {"team": (2, 8), "support": (None, None)}
+
+    def test_list_chats_never_asks_for_a_dialog_outside_the_allowlist(self):
+        client = unread_client(10, read_up_to=8)
+        del client.entities[SUPPORT.id]  # this chat could not be resolved at all
+        result = asyncio.run(handlers.list_chats(client, allowlist()))
+        asked = [i for c in client.calls if c[0] == "get_peer_dialogs" for i in c[1]]
+        assert asked == [TEAM.id]
+        assert "unread_count" not in next(c for c in result["chats"] if c["alias"] == "support")
+
+
+class TestReadingForwards:
+    def test_after_id_reads_the_messages_that_follow_it_oldest_first(self):
+        result = read(unread_client(*range(1, 11), read_up_to=10), after_id=6)
+        assert [m["id"] for m in result["messages"]] == [7, 8, 9, 10]
+        assert "next_after_id" not in result
+
+    def test_after_id_asks_telegram_to_walk_forwards_from_it(self):
+        client = unread_client(*range(1, 11), read_up_to=10)
+        read(client, after_id=6, limit=3)
+        call = next(c for c in client.calls if c[0] == "get_messages")
+        assert call[2] == {"limit": 3, "min_id": 6, "reverse": True}
+
+    def test_a_full_page_tells_where_the_next_one_starts(self):
+        client = unread_client(*range(1, 11), read_up_to=10)
+        first = read(client, after_id=2, limit=3)
+        second = read(client, after_id=first["next_after_id"], limit=3)
+        last = read(client, after_id=second["next_after_id"], limit=3)
+        assert [m["id"] for m in first["messages"]] == [3, 4, 5]
+        assert [m["id"] for m in second["messages"]] == [6, 7, 8]
+        assert [m["id"] for m in last["messages"]] == [9, 10]
+        assert (first["next_after_id"], second["next_after_id"]) == (5, 8)
+        assert "next_after_id" not in last
+
+    def test_after_id_zero_reads_from_the_very_first_message(self):
+        result = read(unread_client(*range(1, 6), read_up_to=5), after_id=0, limit=2)
+        assert [m["id"] for m in result["messages"]] == [1, 2]
+
+    def test_after_and_before_id_read_the_range_between_them(self):
+        result = read(unread_client(*range(1, 11), read_up_to=10), after_id=3, before_id=7)
+        assert [m["id"] for m in result["messages"]] == [4, 5, 6]
+
+    def test_a_negative_after_id_is_a_clear_refusal_before_the_network(self):
+        client = unread_client(10, read_up_to=8)
+        with pytest.raises(ValueError, match="after_id"):
+            read(client, after_id=-1)
+        assert client.calls == []
+
+    def test_the_default_read_stays_newest_first_and_asks_for_no_dialog(self):
+        client = unread_client(*range(1, 11), read_up_to=6)
+        result = read(client, limit=3)
+        assert [m["id"] for m in result["messages"]] == [10, 9, 8]
+        assert "next_after_id" not in result
+        assert "unread_count" not in result
+        assert not [c for c in client.calls if c[0] == "get_peer_dialogs"]
+
+
+class TestUnreadOnly:
+    def test_reads_exactly_what_follows_the_read_position_oldest_first(self):
+        result = read(unread_client(*range(1, 11), read_up_to=7), unread_only=True)
+        assert [m["id"] for m in result["messages"]] == [8, 9, 10]
+        assert (result["unread_count"], result["read_inbox_max_id"]) == (3, 7)
+        assert "next_after_id" not in result
+
+    def test_pages_through_the_unread_with_next_after_id(self):
+        client = unread_client(*range(1, 11), read_up_to=4)
+        first = read(client, unread_only=True, limit=4)
+        second = read(client, unread_only=True, after_id=first["next_after_id"], limit=4)
+        assert [m["id"] for m in first["messages"]] == [5, 6, 7, 8]
+        assert [m["id"] for m in second["messages"]] == [9, 10]
+        assert "next_after_id" not in second
+
+    def test_an_after_id_behind_the_read_position_does_not_bring_read_messages_back(self):
+        result = read(unread_client(*range(1, 11), read_up_to=7), unread_only=True, after_id=2)
+        assert [m["id"] for m in result["messages"]] == [8, 9, 10]
+
+    def test_nothing_unread_is_an_empty_page(self):
+        result = read(unread_client(*range(1, 11), read_up_to=10), unread_only=True)
+        assert result["messages"] == []
+        assert result["unread_count"] == 0
+        assert "next_after_id" not in result
+
+    def test_marks_nothing_as_read(self):
+        # The only requests are the ones that look: the chat, its dialog, its messages.
+        # A read acknowledgement would be one more call, and the fake has no such method.
+        client = unread_client(*range(1, 11), read_up_to=7)
+        read(client, unread_only=True)
+        assert [c[0] for c in client.calls] == ["get_entity", "get_peer_dialogs", "get_messages"]
+
+    def test_a_chat_without_a_read_position_is_a_clear_refusal_not_a_guess(self):
+        client = unread_client(*range(1, 11), read_up_to=7)
+        client.dialogs = []
+        with pytest.raises(ValueError, match="'team'"):
+            read(client, unread_only=True)
+        assert not [c for c in client.calls if c[0] == "get_messages"]
+
+    def test_a_failed_dialog_request_surfaces_instead_of_being_guessed_around(self):
+        client = unread_client(*range(1, 11), read_up_to=7)
+        client.refused_dialogs = {TEAM.id}
+        with pytest.raises(ValueError, match="CHANNEL_PRIVATE"):
+            read(client, unread_only=True)
+        assert not [c for c in client.calls if c[0] == "get_messages"]
+
+    def test_denies_chat_outside_allowlist_without_touching_network(self):
+        client = unread_client(10, read_up_to=8)
+        with pytest.raises(ChatNotAllowed):
+            asyncio.run(handlers.get_messages(client, allowlist(), PRIVATE_ID, unread_only=True))
+        assert client.calls == []

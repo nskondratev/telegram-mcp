@@ -210,6 +210,25 @@ class TestPersonalAdditionsInCommands:
         assert "OK   side" in out
         assert "a chat outside the allowlist was rejected" in out
 
+    def test_check_shows_how_much_is_unread_when_telegram_tells(self, tmp_path, monkeypatch, capsys):
+        main, local = self._files(tmp_path)
+        self._fake_telegram(monkeypatch)
+
+        async def fake_chat_info(_client, allowlist, chat):
+            alias = allowlist.entry(chat).alias
+            return {"title": alias, "unread_count": 3 if alias == "team" else None}
+
+        async def fake_messages(_client, allowlist, chat, limit=1):
+            allowlist.entry(chat)
+            return {"messages": []}
+
+        monkeypatch.setattr(cli.handlers, "get_chat_info", fake_chat_info)
+        monkeypatch.setattr(cli.handlers, "get_messages", fake_messages)
+        asyncio.run(cli.cmd_check(main, local))
+        lines = capsys.readouterr().out.splitlines()
+        assert "(latest: no messages, unread: 3)" in next(line for line in lines if "OK   team" in line)
+        assert "(latest: no messages)" in next(line for line in lines if "OK   side" in line)
+
 
 # Claude Code's own files as a source of credentials
 

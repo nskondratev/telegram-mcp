@@ -231,9 +231,63 @@ async def _entity_of(client, allowlist: AllowList, chat):
     return entry, entity
 
 
+def _dialogs_by_id(dialogs) -> dict:
+    return {_marked_id(getattr(dialog, "peer", None)): dialog for dialog in dialogs}
+
+
+def _read_state(dialog) -> dict:
+    """How much of a chat is unread, and the id of the last message read in it."""
+    return {
+        "unread_count": getattr(dialog, "unread_count", None),
+        "read_inbox_max_id": getattr(dialog, "read_inbox_max_id", None),
+    }
+
+
+async def _dialogs_of(client, entities) -> dict:
+    """The dialog of each chat, keyed by its marked id, in one request.
+
+    Best-effort, like _reactor_names: when the batch fails — one chat Telegram
+    refuses is enough — every chat is asked on its own, so the others keep their
+    counts, and a chat that still fails is left without any.
+    """
+    entities = list(entities)
+    if not entities:
+        return {}
+    try:
+        return _dialogs_by_id(await client.get_peer_dialogs(entities))
+    except Exception:
+        if len(entities) == 1:
+            return {}
+    dialogs = []
+    for entity in entities:
+        try:
+            dialogs.extend(await client.get_peer_dialogs([entity]))
+        except Exception:
+            continue
+    return _dialogs_by_id(dialogs)
+
+
+async def _read_boundary(client, entry, entity) -> dict:
+    """The read state of one chat, for reading what follows it: no guessing here.
+
+    Unlike _dialogs_of this is not best-effort — a failed request propagates as
+    it is, and a chat without a dialog is a clear refusal, because any boundary
+    made up in its place would silently skip or repeat messages.
+    """
+    dialog = _dialogs_by_id(await client.get_peer_dialogs([entity])).get(_marked_id(entity))
+    state = _read_state(dialog)
+    if state["read_inbox_max_id"] is None:
+        raise ValueError(
+            f"Telegram keeps no read position for {entry.alias!r} (a channel that was never joined?), "
+            "so there is nothing to tell the unread messages by. Read with after_id or before_id instead."
+        )
+    return state
+
+
 async def list_chats(client, allowlist: AllowList) -> dict:
-    """Allowed chats together with their current titles."""
+    """Allowed chats together with their current titles and unread counts."""
     chats = []
+    resolved = []
     for entry in allowlist.entries:
         item = {"alias": entry.alias, "id": entry.id, "title": entry.title, "note": entry.note}
         try:
@@ -243,34 +297,65 @@ async def list_chats(client, allowlist: AllowList) -> dict:
         else:
             item["title"] = _display_name(entity, entry.title)
             item["username"] = getattr(entity, "username", None)
+            resolved.append((item, entity))
         chats.append(item)
+    dialogs = await _dialogs_of(client, [entity for _, entity in resolved])
+    for item, entity in resolved:
+        item.update(_read_state(dialogs.get(_marked_id(entity))))
     return {"chats": chats}
 
 
 async def get_chat_info(client, allowlist: AllowList, chat) -> dict:
-    """Metadata of an allowed chat."""
+    """Metadata of an allowed chat, the unread count and the read position included."""
     entry, entity = await _entity_of(client, allowlist, chat)
+    dialogs = await _dialogs_of(client, [entity])
     return {
         "alias": entry.alias,
         "id": entry.id,
         "title": _display_name(entity, entry.title),
         "username": getattr(entity, "username", None),
         "participants_count": getattr(entity, "participants_count", None),
+        **_read_state(dialogs.get(_marked_id(entity))),
         "note": entry.note,
     }
 
 
-async def get_messages(client, allowlist: AllowList, chat, limit=DEFAULT_LIMIT, before_id=None) -> dict:
-    """Latest messages of an allowed chat (newest first)."""
+async def get_messages(
+    client, allowlist: AllowList, chat, limit=DEFAULT_LIMIT, before_id=None, after_id=None, unread_only=False
+) -> dict:
+    """Messages of an allowed chat: the latest ones newest first, or onwards from an id.
+
+    ``after_id`` reads forwards: the messages that follow it, oldest first.
+    ``unread_only`` reads forwards from the chat's read position, and together
+    with ``after_id`` from whichever of the two is further on — so paging on with
+    ``next_after_id`` keeps working. A full forward page carries ``next_after_id``.
+    Nothing is marked as read: the read position is only looked at.
+    """
+    after = None
+    if after_id is not None:
+        after = int(after_id)
+        if after < 0:
+            raise ValueError(f"after_id must be a message id (0 or more), got {after}.")
     entry, entity = await _entity_of(client, allowlist, chat)
-    kwargs = {"limit": _clamp(limit)}
+    result = {"chat": _chat_ref(entry, entity)}
+    limit = _clamp(limit)
+    kwargs = {"limit": limit}
     if before_id:
         kwargs["max_id"] = int(before_id)
+    if unread_only:
+        state = await _read_boundary(client, entry, entity)
+        result.update(state)
+        after = max(after or 0, state["read_inbox_max_id"])
+    if after is not None:
+        # With reverse=True Telethon starts right after min_id and walks towards
+        # the newest message; without it, min_id would only be where it stops,
+        # and a page would hold the newest messages instead of the next ones.
+        kwargs.update(min_id=after, reverse=True)
     messages = await client.get_messages(entity, **kwargs)
-    return {
-        "chat": _chat_ref(entry, entity),
-        "messages": await _messages_to_dicts(client, entity, messages),
-    }
+    result["messages"] = await _messages_to_dicts(client, entity, messages)
+    if after is not None and len(messages) >= limit:
+        result["next_after_id"] = messages[-1].id
+    return result
 
 
 async def get_message_context(client, allowlist: AllowList, chat, message_id, around=5) -> dict:
