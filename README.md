@@ -63,6 +63,10 @@ that gap is the whole point of this server:
 
 A chat is referenced by its alias (`team`), its exact title, or its id.
 
+A message written with Telegram's rich formatting — headings, lists, code blocks, tables —
+keeps its text in blocks and leaves the plain text empty. Its `text` is those blocks rendered
+as markdown, the same form the formatting of an ordinary message comes in.
+
 Every message that `get_messages`, `get_message_context` and `search_messages` return
 carries a `reactions` field — `null` when there are none:
 

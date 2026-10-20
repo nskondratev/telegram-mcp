@@ -8,6 +8,7 @@ without an account.
 from __future__ import annotations
 
 from .core import AllowList, ChatNotAllowed, sanitize_emoji, sanitize_text
+from .rich import rich_message_text
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
@@ -189,6 +190,15 @@ async def _custom_emoji_of(client, messages) -> dict:
         return {}
 
 
+def _text_of(message) -> str | None:
+    """The message text; a rich message keeps it in blocks and leaves message.message empty."""
+    return (
+        getattr(message, "text", None)
+        or getattr(message, "message", None)
+        or rich_message_text(getattr(message, "rich_message", None))
+    )
+
+
 def _message_to_dict(message, names=None, custom_emoji=None) -> dict:
     date = getattr(message, "date", None)
     return {
@@ -196,7 +206,7 @@ def _message_to_dict(message, names=None, custom_emoji=None) -> dict:
         "date": date.isoformat() if date is not None else None,
         "sender": _display_name(getattr(message, "sender", None)),
         "sender_id": getattr(message, "sender_id", None),
-        "text": sanitize_text(getattr(message, "text", None) or getattr(message, "message", None)),
+        "text": sanitize_text(_text_of(message)),
         "reply_to": getattr(message, "reply_to_msg_id", None),
         "media": _media_type(message),
         "file": file_info(message),

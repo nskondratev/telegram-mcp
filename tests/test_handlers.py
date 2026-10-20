@@ -13,6 +13,7 @@ from telethon.tl.types import (
     Dialog,
     MessagePeerReaction,
     MessageReactions,
+    PageBlockParagraph,
     PeerChannel,
     PeerNotifySettings,
     PeerUser,
@@ -20,6 +21,9 @@ from telethon.tl.types import (
     ReactionCustomEmoji,
     ReactionEmoji,
     ReactionPaid,
+    RichMessage,
+    TextBold,
+    TextPlain,
     User,
 )
 from telethon.tl.types.messages import MessageReactionsList
@@ -186,6 +190,22 @@ class TestGetMessages:
         client.messages[TEAM.id] = [FakeMessage(11, "he\u200bllo\x00", sender=FakeSender("Bob"))]
         result = asyncio.run(handlers.get_messages(client, allowlist(), "team"))
         assert result["messages"][0]["text"] == "hello"
+
+    def test_reads_text_of_a_rich_message(self):
+        """A rich message keeps its text in blocks, and message.message stays empty."""
+        rich = FakeMessage(12, "", sender=FakeSender("Bob"))
+        rich.rich_message = RichMessage(
+            blocks=[
+                PageBlockParagraph(text=TextBold(text=TextPlain(text="Rules"))),
+                PageBlockParagraph(text=TextPlain(text="he\u200bllo")),
+            ],
+            photos=[],
+            documents=[],
+        )
+        client = work_client()
+        client.messages[TEAM.id] = [rich]
+        result = asyncio.run(handlers.get_messages(client, allowlist(), "team"))
+        assert result["messages"][0]["text"] == "**Rules**\n\nhello"
 
     def test_rejects_entity_whose_real_id_is_not_allowed(self):
         """Anti-spoofing: the entity came back with someone else's id, so it must not be served."""
