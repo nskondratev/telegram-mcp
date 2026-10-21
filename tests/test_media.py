@@ -327,6 +327,15 @@ class TestDownloadMessageMedia:
         with pytest.raises(ValueError, match="no downloadable media"):
             run(client, "team", tmp_path)
 
+    def test_a_poll_points_to_where_it_can_be_read(self, tmp_path):
+        class MessageMediaPoll:
+            pass
+
+        message = FakeMessage(file=None)
+        message.media = MessageMediaPoll()
+        with pytest.raises(ValueError, match="media: Poll.*get_poll_votes"):
+            run(FakeClient(message), "team", tmp_path)
+
     def test_missing_message_is_a_clear_error(self, tmp_path):
         client = FakeClient(None)
         with pytest.raises(ValueError, match="not found"):

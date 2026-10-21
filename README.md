@@ -22,7 +22,7 @@ that gap is the whole point of this server:
 | Chats reachable | only those in `allowed_chats.json` | every dialog of the account |
 | Write tools | none exist in the code | usually present, sometimes toggled off |
 | Untrusted text | control and zero-width characters stripped, length capped | as-is |
-| Tools exposed | 7 | 40–80 |
+| Tools exposed | 8 | 40–80 |
 
 ## Security model
 
@@ -35,13 +35,14 @@ that gap is the whole point of this server:
 - **The answer is re-checked.** After Telegram resolves an entity, its real id is matched
   against the allowlist again — a renamed or substituted chat cannot slip through.
 - **No write path.** There is no `send_message` to disable: the code does not contain one.
-  All seven tools are annotated `readOnlyHint`. Reading does not mark anything as read
-  either: unread counts come from `messages.getPeerDialogs`, which only looks.
+  All eight tools are annotated `readOnlyHint`. Reading does not mark anything as read
+  either: unread counts come from `messages.getPeerDialogs`, which only looks. Polls are
+  read, never voted in: `messages.getPollVotes` lists votes without casting one.
 - **Fetching a file is still reading.** `get_message_media` downloads an attachment
   through the same allowlist check, and pictures it hands back are untrusted data
   like any text: a screenshot can carry what looks like an instruction.
-- **Text is data, not instructions.** Message texts, names, titles and attachment file
-  names are sanitised (zero-width characters, bidi overrides, control characters) and
+- **Text is data, not instructions.** Message texts, poll questions and options, names,
+  titles and attachment file names are sanitised (zero-width characters, bidi overrides, control characters) and
   truncated, and the tool descriptions tell the model to treat them as untrusted input.
   Reaction emoji go through the same filter, except that the zero-width joiner survives:
   without it ❤‍🔥 and 👨‍💻 would fall apart into two emoji each.
@@ -60,6 +61,7 @@ that gap is the whole point of this server:
 | `search_messages` | full-text search in one allowed chat or across all of them |
 | `get_message_media` | the attachment of one message — a picture comes back inline, anything else as a path |
 | `get_message_reactions` | who reacted to one message and with what, page by page, optionally narrowed to one emoji |
+| `get_poll_votes` | who voted for what in one poll, page by page, optionally narrowed to one option |
 
 A chat is referenced by its alias (`team`), its exact title, or its id.
 
@@ -88,6 +90,41 @@ past 2⁵³, where a JavaScript client would round a number. A paid ⭐ reaction
 The counts cost no extra request; the names behind `by` and the custom emoji cost one
 request each per chat read, and a failed lookup leaves the ids in place instead of
 failing the read.
+
+### Polls
+
+A message with a poll has an empty `text` and `media: "Poll"`; the poll itself is in its
+`poll` field — `null` on every other message:
+
+```json
+"poll": {
+  "question": "Which plugins do you use every week?",
+  "anonymous": false, "multiple_choice": true, "quiz": false, "closed": false,
+  "total_voters": 4,
+  "options": [
+    {"option": 0, "text": "codex-rounds", "voters": 3, "percent": 75.0, "chosen": true},
+    {"option": 1, "text": "dev-task", "voters": 1, "percent": 25.0}
+  ]
+}
+```
+
+`percent` is the share of the people who voted, so in a multiple choice poll the shares add
+up past 100. `chosen` marks your own vote; in a quiz, `correct` marks the right answer and
+`solution` carries the explanation, once Telegram reveals them. An open poll with a deadline
+carries `closes_at`.
+
+The votes come only from the results Telegram puts into the message. When there are none —
+it shows them to those who voted, and a poll can hide them until it closes — the options
+carry no `voters` at all and `note` says why, rather than reporting zeroes. Reading the poll
+costs no extra request.
+
+`get_poll_votes` lists who voted for what, page by page: each voter with the options they
+chose, narrowed to one option by `option` — its number from `poll.options`; each voter then
+carries that option alone. `total` is how
+many people match the request; `next_offset` asks for the next page. An anonymous poll keeps
+its voters secret, and so does a poll whose results Telegram did not send: then `votes` is
+empty and `note` says why. Nothing is ever voted, so a poll you have not voted in stays that
+way.
 
 ### Unread messages
 

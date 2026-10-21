@@ -14,6 +14,8 @@ MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 #: Telegram hands out at most this many reactions per page.
 REACTIONS_MAX_LIMIT = 100
+#: Page size cap for the voters of a poll.
+POLL_VOTES_MAX_LIMIT = 50
 
 
 def _marked_id(entity) -> int | None:
@@ -110,14 +112,18 @@ def _reaction_label(reaction, custom_emoji) -> dict | None:
     return {"emoji": "⭐", "paid": True}
 
 
-def _reactor(entry, names) -> dict:
-    peer_id = _marked_id(getattr(entry, "peer_id", None))
-    date = getattr(entry, "date", None)
+def _person(peer, date, names) -> dict:
+    """Someone who reacted or voted: the id, the name when known, and when they did it."""
+    peer_id = _marked_id(peer)
     return {
         "id": peer_id,
         "name": names.get(peer_id),
         "date": date.isoformat() if date is not None else None,
     }
+
+
+def _reactor(entry, names) -> dict:
+    return _person(getattr(entry, "peer_id", None), getattr(entry, "date", None), names)
 
 
 def reactions_info(message, names=None, custom_emoji=None, reactors=True) -> list[dict] | None:
@@ -148,6 +154,83 @@ def reactions_info(message, names=None, custom_emoji=None, reactors=True) -> lis
             item["by"] = by
         items.append(item)
     return items or None
+
+
+def _plain_text(value) -> str:
+    """The text of a TextWithEntities, which is what a poll question and its options are."""
+    if value is None or isinstance(value, str):
+        return value or ""
+    return getattr(value, "text", None) or ""
+
+
+def _poll_of(message):
+    """The MessageMediaPoll of a message, or None for anything that is not a poll."""
+    media = getattr(message, "media", None)
+    if type(media).__name__ != "MessageMediaPoll" or getattr(media, "poll", None) is None:
+        return None
+    return media
+
+
+def _hidden_results_note(poll) -> str:
+    if getattr(poll, "hide_results_until_close", None) and not getattr(poll, "closed", None):
+        return (
+            "This poll hides its results until it closes: Telegram sent the question and the "
+            "options, not the votes."
+        )
+    return (
+        "Telegram did not send the results of this poll — it shows them to those who voted — "
+        "so only the question and the options are known, not the votes."
+    )
+
+
+def poll_info(message) -> dict | None:
+    """The poll of a message: the question, the options and, when Telegram tells them, the votes.
+
+    None when the message is not a poll, for the same reason as file_info.
+    ``option`` is the option's position in the poll, which get_poll_votes takes
+    to narrow the voters down. Votes come only from the results Telegram put in
+    the message: when it put none there, the options carry no ``voters`` and
+    ``note`` says why — reporting zeroes would read as a poll nobody voted in.
+    """
+    media = _poll_of(message)
+    if media is None:
+        return None
+    poll = media.poll
+    results = getattr(media, "results", None)
+    counted = {r.option: r for r in getattr(results, "results", None) or [] if r.voters is not None}
+    total = getattr(results, "total_voters", None)
+    info = {
+        "question": sanitize_text(_plain_text(poll.question), limit=300),
+        "anonymous": not poll.public_voters,
+        "multiple_choice": bool(poll.multiple_choice),
+        "quiz": bool(poll.quiz),
+        "closed": bool(poll.closed),
+        "total_voters": total,
+        "options": [],
+    }
+    close_date = getattr(poll, "close_date", None)
+    if close_date is not None and not poll.closed:
+        info["closes_at"] = close_date.isoformat()
+    for index, answer in enumerate(poll.answers):
+        item = {"option": index, "text": sanitize_text(_plain_text(answer.text), limit=200)}
+        votes = counted.get(answer.option)
+        if votes is not None:
+            item["voters"] = votes.voters
+            # Of the people who voted: in a multiple choice poll the shares add up past 100.
+            item["percent"] = round(100 * votes.voters / total, 1) if total else 0.0
+            if votes.chosen:
+                item["chosen"] = True
+            if poll.quiz and votes.correct:
+                item["correct"] = True
+        info["options"].append(item)
+    if not counted:
+        info["note"] = _hidden_results_note(poll)
+    elif getattr(results, "min", None):
+        info["note"] = "Telegram sent these results without your own vote: chosen is not known."
+    solution = getattr(results, "solution", None)
+    if solution:
+        info["solution"] = sanitize_text(solution, limit=500)
+    return info
 
 
 def _names_of(entities) -> dict:
@@ -211,6 +294,7 @@ def _message_to_dict(message, names=None, custom_emoji=None) -> dict:
         "media": _media_type(message),
         "file": file_info(message),
         "reactions": reactions_info(message, names, custom_emoji),
+        "poll": poll_info(message),
     }
 
 
@@ -465,6 +549,86 @@ async def get_message_reactions(
     result["reactions"] = [
         {**_reactor(r, names), **(_reaction_label(r.reaction, custom_emoji) or {})} for r in page.reactions
     ]
+    if page.next_offset:
+        result["next_offset"] = page.next_offset
+    return result
+
+
+async def get_poll_votes(
+    client, allowlist: AllowList, chat, message_id, option=None, limit=DEFAULT_LIMIT, offset=None
+) -> dict:
+    """Who voted for what in one poll, a page at a time. Nothing is voted.
+
+    ``poll`` is the poll itself, the same as on the message; ``votes`` lists the
+    people behind it, narrowed to one option by ``option`` — its position in
+    ``poll.options``. ``total`` is how many people match the request, so the list
+    is complete once it holds that many. Telegram keeps the voters of an
+    anonymous poll secret, and shows those of an open one only when it shows the
+    results: then ``votes`` stays empty and ``note`` says why.
+    """
+    message_id = int(message_id)
+    if message_id <= 0:
+        # Telethon reads ids=0 as "no ids at all" and answers with a list of messages.
+        raise ValueError(f"message_id must be a positive message id, got {message_id}.")
+    if option is not None:
+        option = int(option)
+        if option < 0:
+            raise ValueError(f"option must be a position in poll.options (0 or more), got {option}.")
+    entry, entity = await _entity_of(client, allowlist, chat)
+    message = await client.get_messages(entity, ids=message_id)
+    if message is None:
+        raise ValueError(f"Message {message_id} was not found in {entry.alias!r}.")
+    poll = poll_info(message)
+    if poll is None:
+        raise ValueError(
+            f"Message {message_id} in {entry.alias!r} is not a poll "
+            f"(media: {_media_type(message) or 'none'})."
+        )
+    options = poll["options"]
+    if option is not None and option >= len(options):
+        raise ValueError(f"option must be a position in poll.options, 0 to {len(options) - 1}; got {option}.")
+
+    result = {
+        "chat": _chat_ref(entry, entity),
+        "message_id": message_id,
+        "poll": poll,
+        "total": poll["total_voters"] if option is None else options[option].get("voters"),
+        "votes": [],
+    }
+    if poll["anonymous"]:
+        result["note"] = "The poll is anonymous: Telegram does not disclose who voted — only the counts."
+        return result
+    if not any("voters" in item for item in options):
+        result["note"] = poll["note"]
+        return result
+
+    answers = _poll_of(message).poll.answers
+    positions = {answer.option: index for index, answer in enumerate(answers)}
+    page = await client.get_poll_votes(
+        entity,
+        message_id,
+        option=None if option is None else answers[option].option,
+        limit=_clamp(limit, maximum=POLL_VOTES_MAX_LIMIT),
+        offset=offset or None,
+    )
+    names = _names_of([*page.users, *page.chats])
+    result["total"] = page.count
+    for vote in page.votes:
+        if getattr(vote, "options", None) is not None:
+            chosen = [positions.get(raw) for raw in vote.options]
+        elif getattr(vote, "option", None) is not None:
+            chosen = [positions.get(vote.option)]
+        else:
+            # Asked for one option, Telegram leaves it out of every vote: it is the one asked for.
+            chosen = [option]
+        result["votes"].append(
+            {
+                **_person(getattr(vote, "peer", None), getattr(vote, "date", None), names),
+                "options": [
+                    {"option": i, "text": options[i]["text"] if i is not None else None} for i in chosen
+                ],
+            }
+        )
     if page.next_offset:
         result["next_offset"] = page.next_offset
     return result
