@@ -205,9 +205,14 @@ async def download_message_media(
     meta = file_info(message) or {}
     size = meta.get("size")
     if not size:
+        hint = (
+            " A poll is in the poll field of get_messages, and its voters in get_poll_votes."
+            if _media_type(message) == "Poll"
+            else ""
+        )
         raise ValueError(
             f"Message {message_id} in {entry.alias!r} carries no downloadable media "
-            f"(media: {_media_type(message) or 'none'})."
+            f"(media: {_media_type(message) or 'none'}).{hint}"
         )
 
     out_dir = Path(out_dir).expanduser()

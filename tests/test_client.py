@@ -62,11 +62,13 @@ def test_delegates_get_messages():
 class RawClient:
     """Answers raw TL requests the way Telethon's ``client(request)`` does."""
 
-    def __init__(self, documents=None, reactions_page=None, updates=None, peer_dialogs=None):
+    def __init__(self, documents=None, reactions_page=None, updates=None, peer_dialogs=None, votes=None):
         self.documents = documents or []
         self.reactions_page = reactions_page
         self.updates = updates
         self.peer_dialogs = peer_dialogs
+        #: The answer to messages.getPollVotes, or an exception to raise instead.
+        self.votes = votes
         self.requests = []
 
     async def __call__(self, request):
@@ -75,6 +77,7 @@ class RawClient:
             GetMessageReactionsListRequest,
             GetMessagesReactionsRequest,
             GetPeerDialogsRequest,
+            GetPollVotesRequest,
         )
 
         self.requests.append(request)
@@ -86,6 +89,10 @@ class RawClient:
             return self.updates
         if isinstance(request, GetPeerDialogsRequest):
             return self.peer_dialogs
+        if isinstance(request, GetPollVotesRequest):
+            if isinstance(self.votes, Exception):
+                raise self.votes
+            return self.votes
         raise AssertionError(f"unexpected request {request!r}")
 
 
@@ -205,6 +212,30 @@ class TestGetReactionsList:
             )
         assert inner.requests == []
 
+
+
+class TestGetPollVotes:
+    def test_asks_for_one_page_of_the_votes(self):
+        inner = RawClient(votes="page")
+        result = asyncio.run(
+            CachedClient(inner).get_poll_votes("chat", 10, option=b"1", limit=50, offset="p2")
+        )
+        assert result == "page"
+        request = inner.requests[0]
+        assert (request.peer, request.id, request.option, request.limit, request.offset) == (
+            "chat",
+            10,
+            b"1",
+            50,
+            "p2",
+        )
+
+    def test_votes_hidden_until_voting_are_a_clear_refusal(self):
+        from telethon.errors import PollVoteRequiredError
+
+        inner = RawClient(votes=PollVoteRequiredError(request=None))
+        with pytest.raises(ValueError, match="never votes"):
+            asyncio.run(CachedClient(inner).get_poll_votes("chat", 10, option=None, limit=50, offset=None))
 
 
 def peer_dialogs(*dialogs):

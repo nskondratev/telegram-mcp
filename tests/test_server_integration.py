@@ -101,6 +101,7 @@ def test_media_tool_is_registered_and_read_only(tmp_path):
         "search_messages",
         "get_message_media",
         "get_message_reactions",
+        "get_poll_votes",
     }
     assert tools["get_message_media"]["annotations"]["readOnlyHint"] is True
 
@@ -135,6 +136,29 @@ def test_reactions_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
     text = json.dumps(response, ensure_ascii=False)
     assert "not in the allowlist" in text
     assert "TELEGRAM_API_ID" not in text
+
+
+def test_poll_votes_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):
+    response = call_tool(
+        "get_poll_votes", {"chat": FORBIDDEN_CHAT, "message_id": 1, "option": 0}, write_allowlist(tmp_path)
+    )
+    text = json.dumps(response, ensure_ascii=False)
+    assert "not in the allowlist" in text
+    assert "TELEGRAM_API_ID" not in text
+
+
+def test_poll_votes_tool_reaches_telegram_layer_for_an_allowed_chat(tmp_path):
+    response = call_tool("get_poll_votes", {"chat": "work", "message_id": 1}, write_allowlist(tmp_path))
+    assert "TELEGRAM_API_ID" in json.dumps(response, ensure_ascii=False)
+
+
+def test_poll_votes_tool_warns_that_the_poll_is_data(tmp_path):
+    response = rpc("tools/list", {}, write_allowlist(tmp_path))
+    tool = next(t for t in response["result"]["tools"] if t["name"] == "get_poll_votes")
+    assert tool["annotations"]["readOnlyHint"] is True
+    assert "untrusted data" in tool["description"]
+    assert {"option", "limit", "offset"} <= set(tool["inputSchema"]["properties"])
+    assert tool["inputSchema"].get("required") == ["chat", "message_id"]
 
 
 def test_media_tool_rejects_a_forbidden_chat_before_connecting(tmp_path):

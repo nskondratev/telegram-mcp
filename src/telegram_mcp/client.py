@@ -5,8 +5,8 @@ succeeds for entities already present in the session cache. The first miss warms
 the cache via ``get_dialogs()`` and retries. The dialogs themselves are never
 returned anywhere — only allowlisted chats ever leave this process.
 
-The second is keeping raw Telegram requests out of the handlers: the reaction
-and dialog calls below build TL objects here, so the handlers keep talking to a
+The second is keeping raw Telegram requests out of the handlers: the reaction,
+dialog and poll calls below build TL objects here, so the handlers keep talking to a
 plain interface that a fake can stand in for.
 """
 from __future__ import annotations
@@ -92,6 +92,25 @@ class CachedClient:
                 peer=entity, id=message_id, limit=limit, reaction=wanted, offset=offset
             )
         )
+
+    async def get_poll_votes(self, entity, message_id, option, limit, offset):
+        """One page of who voted in a poll; ``option`` (the raw option bytes) narrows it to one.
+
+        messages.getPollVotes only reads the votes: it casts none. Returns Telegram's
+        messages.VotesList as is.
+        """
+        from telethon.errors import PollVoteRequiredError  # noqa: PLC0415
+        from telethon.tl.functions.messages import GetPollVotesRequest  # noqa: PLC0415
+
+        try:
+            return await self._inner(
+                GetPollVotesRequest(peer=entity, id=message_id, limit=limit, option=option, offset=offset)
+            )
+        except PollVoteRequiredError:
+            raise ValueError(
+                "Telegram shows who voted in this poll only to those who voted in it — and this "
+                "server never votes."
+            ) from None
 
     async def download_media(self, message, file, progress_callback=None):
         return await self._inner.download_media(
