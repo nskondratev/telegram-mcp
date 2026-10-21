@@ -119,7 +119,8 @@ carry no `voters` at all and `note` says why, rather than reporting zeroes. Read
 costs no extra request.
 
 `get_poll_votes` lists who voted for what, page by page: each voter with the options they
-chose, narrowed to one option by `option` — its number from `poll.options`. `total` is how
+chose, narrowed to one option by `option` — its number from `poll.options`; each voter then
+carries that option alone. `total` is how
 many people match the request; `next_offset` asks for the next page. An anonymous poll keeps
 its voters secret, and so does a poll whose results Telegram did not send: then `votes` is
 empty and `note` says why. Nothing is ever voted, so a poll you have not voted in stays that

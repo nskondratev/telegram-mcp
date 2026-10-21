@@ -356,6 +356,7 @@ async def get_poll_votes(
     chat — an alias from list_chats, an exact title, or an id.
     message_id — the id of the poll message from get_messages.
     option — only the voters of this option: its option number from poll.options.
+      Each voter then carries this option alone, not everything they chose.
     limit — people per page, up to 50.
     offset — the next_offset of the previous page.
 
