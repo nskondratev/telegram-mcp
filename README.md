@@ -169,6 +169,23 @@ uvx --from git+https://github.com/nskondratev/telegram-mcp telegram-mcp login
 Telethon asks for your phone number, the login code and the 2FA password — you type them
 yourself, they are never stored. The command prints a session string.
 
+**The login code does not arrive?** Telegram may send the code for a third-party app only to
+your Telegram apps — no SMS, no call, and asking for it again does not help. Sign in with a QR
+code instead, which needs neither the phone number nor the code:
+
+```bash
+uvx --with qrcode --from git+https://github.com/nskondratev/telegram-mcp telegram-mcp login --qr
+```
+
+A QR code appears in the terminal. On your phone, open Telegram → Settings → Devices →
+**Link Desktop Device** (in Russian: Настройки → Устройства → «Подключить устройство») and
+scan it. The code expires in about 30 seconds and is redrawn with a fresh one, so there is no
+rush. With two-step verification on, the command asks for the 2FA password after the scan.
+Then it prints the session string, as a plain `login` does.
+
+`--qr` draws the code with the [`qrcode`](https://pypi.org/project/qrcode/) package — the
+`qr` extra; `--with qrcode` adds it for this one run. The server itself never needs it.
+
 > ⚠️ **The session string grants full access to your Telegram account.** Treat it like a
 > password: never commit it, never paste it into a chat. It lives in your MCP client
 > config (for Claude Code, `~/.claude.json` or the `env` block of `~/.claude/settings.json`),
@@ -354,7 +371,7 @@ first, run `login`, and paste the session string it prints as `TELEGRAM_SESSION_
 ```bash
 git clone https://github.com/nskondratev/telegram-mcp
 cd telegram-mcp
-uv run --extra dev pytest      # 288 tests, no account or network required
+uv run --extra dev pytest      # 346 tests, no account or network required
 uv run --extra dev ruff check .
 ```
 

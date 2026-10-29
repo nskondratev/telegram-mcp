@@ -1,7 +1,8 @@
 """Command line entry point: serve, login, dialogs, check, download.
 
     telegram-mcp serve     run the MCP server over stdio (this is what the client starts)
-    telegram-mcp login     issue a session string (asks for phone, code and 2FA password)
+    telegram-mcp login     issue a session string (asks for phone, code and 2FA password;
+                           with --qr, a QR code scanned from your phone replaces the first two)
     telegram-mcp dialogs   list your chats with their ids, to fill in the allowlist
     telegram-mcp check     verify that every allowed chat resolves and reads
     telegram-mcp download  save the media file of one message, by link or by alias
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import sys
@@ -165,7 +167,12 @@ def resolve_target(target: str, message_id: int | None) -> tuple[int | str, int]
     return target, int(message_id)
 
 
-def build_client(session: str | None):
+def build_client(session: str | None, *, receive_updates: bool = False):
+    """A Telethon client with our credentials and device name.
+
+    Updates stay off: the server and the commands only ever ask, they never listen.
+    `login --qr` is the exception — it learns about the scan from an update.
+    """
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
@@ -174,7 +181,7 @@ def build_client(session: str | None):
         StringSession(session or ""),
         api_id,
         api_hash,
-        receive_updates=False,
+        receive_updates=receive_updates,
         device_model="Claude MCP (read-only)",
         system_version="1.0",
         app_version="1.0",
@@ -200,12 +207,90 @@ async def _connected(session: str):
     return client
 
 
-async def cmd_login() -> None:
-    client = build_client(None)
-    await client.start()  # Telethon asks for the phone number, the code and the 2FA password
-    me = await client.get_me()
-    session = client.session.save()
-    await client.disconnect()
+#: How many times the 2FA password may be typed, as in Telethon's own ``client.start()``.
+PASSWORD_ATTEMPTS = 3
+
+QR_HINT = "Scan it with a Telegram app you are signed in to: Settings → Devices → Link Desktop Device."
+
+
+def _qr_printer():
+    """The function that draws a QR code in the terminal; a clear exit if it cannot.
+
+    The drawing needs the qrcode package, an optional extra: only `login --qr` uses it,
+    the server never does. A missing package is reported before anything reaches Telegram.
+    """
+    try:
+        import qrcode
+    except ImportError:
+        raise SystemExit(
+            "`login --qr` needs the qrcode package to draw the code. Run it with the package added:\n"
+            f"  uvx --with qrcode --from git+{REPO_URL} telegram-mcp login --qr\n"
+            "or `pip install qrcode` into the environment telegram-mcp is installed in."
+        ) from None
+
+    def show(url: str) -> None:
+        if sys.stdout.isatty():
+            print("\033[2J\033[H", end="")  # clear the screen: only the live code stays on it
+        code = qrcode.QRCode(border=2)
+        code.add_data(url)
+        code.print_ascii(invert=True)
+        print(QR_HINT)
+        print("The code is renewed about every 30 seconds — leave this running until you scan it.")
+
+    return show
+
+
+async def _sign_in_with_password(client) -> None:
+    from telethon import errors
+
+    for attempt in range(1, PASSWORD_ATTEMPTS + 1):
+        try:
+            await client.sign_in(password=getpass.getpass("2FA password (not shown): "))
+            return
+        except errors.PasswordHashInvalidError:
+            if attempt < PASSWORD_ATTEMPTS:
+                print("Wrong 2FA password, try again.", file=sys.stderr)
+    raise SystemExit(f"Wrong 2FA password {PASSWORD_ATTEMPTS} times — run `telegram-mcp login --qr` again.")
+
+
+async def _sign_in_with_qr(client, show_qr) -> None:
+    """Sign in by a QR code scanned from a Telegram app, with no phone number and no code.
+
+    For when the login code does not come: Telegram may send the code for a third-party
+    app to your Telegram apps only, with no SMS to fall back on. The token behind the QR
+    code lives about 30 seconds, so an expired one is replaced and drawn again until it
+    is scanned. A scan that lands on another data centre (LoginTokenMigrateTo) is handled
+    by Telethon itself; a 2FA password is asked for after the scan.
+    """
+    from telethon import errors
+
+    await client.connect()
+    qr = await client.qr_login()
+    show_qr(qr.url)
+    while True:
+        try:
+            await qr.wait()
+            return
+        except asyncio.TimeoutError:
+            await qr.recreate()
+            show_qr(qr.url)
+        except errors.SessionPasswordNeededError:
+            await _sign_in_with_password(client)
+            return
+
+
+async def cmd_login(qr: bool = False) -> None:
+    show_qr = _qr_printer() if qr else None
+    client = build_client(None, receive_updates=qr)
+    try:
+        if show_qr:
+            await _sign_in_with_qr(client, show_qr)
+        else:
+            await client.start()  # Telethon asks for the phone number, the code and the 2FA password
+        me = await client.get_me()
+        session = client.session.save()
+    finally:
+        await client.disconnect()
 
     print(f"\nSigned in as: {me.first_name or ''} (@{me.username or 'no username'}, id {me.id})")
     print("\nSession string (grants full access to the account — never commit it):\n")
@@ -357,7 +442,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve", help="run the MCP server over stdio")
-    sub.add_parser("login", help="issue a session string")
+    login = sub.add_parser("login", help="issue a session string")
+    login.add_argument(
+        "--qr",
+        action="store_true",
+        help="sign in by scanning a QR code with a Telegram app instead of typing the login code "
+        "(needs the qrcode package)",
+    )
     dialogs = sub.add_parser("dialogs", help="list chats with their ids for the allowlist")
     dialogs.add_argument("--filter", dest="pattern", help="substring of the chat title")
     dialogs.add_argument("--limit", type=int, default=200, help="how many dialogs to scan")
@@ -390,7 +481,7 @@ def main(argv=None) -> None:
 
         serve(allowlist_path, local_path)
     elif args.command == "login":
-        asyncio.run(cmd_login())
+        asyncio.run(cmd_login(qr=args.qr))
     elif args.command == "dialogs":
         asyncio.run(cmd_dialogs(args.pattern, args.limit, args.json, allowlist_path))
     elif args.command == "download":
