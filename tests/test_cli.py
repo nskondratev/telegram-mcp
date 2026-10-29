@@ -1,7 +1,9 @@
 """Tests for argument handling in the CLI: no network, no account."""
 import asyncio
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -602,3 +604,205 @@ class TestTerminalWithOnlyClaudeSettings:
         cli.build_client(None)  # what `login` starts from: there is no session string yet
 
         assert what_telethon_was_given(built) == [("", 12345, "abcdef0123456789")]
+
+
+# `login --qr`: signing in without a login code
+
+
+class FakeQRLogin:
+    """What ``client.qr_login()`` returns: a token that may expire before it is scanned.
+
+    ``outcomes`` is what each ``wait()`` does in turn: an exception to raise, or None for a
+    scan that went through. Every ``recreate()`` issues the next token, so its URL changes.
+    """
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.token = 1
+
+    @property
+    def url(self):
+        return f"tg://login?token=token-{self.token}"
+
+    async def recreate(self):
+        self.token += 1
+
+    async def wait(self, timeout=None):
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+
+def fake_qr_telethon(monkeypatch, outcomes, passwords=()):
+    """A fake Telethon client for `login --qr`; returns what the run left behind.
+
+    ``passwords`` are the answers to the 2FA prompt, the right one being "right-password".
+    The QR codes are not drawn: the URLs that would have been are recorded instead.
+    """
+    from telethon import errors
+
+    seen = {"clients": [], "drawn": [], "passwords": [], "prompts": 0, "disconnected": False}
+    answers = list(passwords)
+
+    class FakeSession:
+        def save(self):
+            return "issued-session-string"
+
+    class FakeQRClient:
+        def __init__(self, session, api_id, api_hash, **kwargs):
+            self.session = FakeSession()
+            self.kwargs = kwargs
+            self.connected = False
+            seen["clients"].append(self)
+
+        async def connect(self):
+            self.connected = True
+
+        async def qr_login(self):
+            assert self.connected, "qr_login needs a connected client"
+            return FakeQRLogin(outcomes)
+
+        async def start(self):
+            raise AssertionError("--qr must not ask for the phone number and the code")
+
+        async def sign_in(self, password=None):
+            seen["passwords"].append(password)
+            if password != "right-password":
+                raise errors.PasswordHashInvalidError(request=None)
+
+        async def get_me(self):
+            return SimpleNamespace(first_name="Ann", username="ann", id=42)
+
+        async def disconnect(self):
+            seen["disconnected"] = True
+
+    def fake_getpass(prompt=""):
+        seen["prompts"] += 1
+        return answers.pop(0)
+
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "abcdef0123456789")
+    monkeypatch.setattr("telethon.TelegramClient", FakeQRClient)
+    monkeypatch.setattr("telethon.sessions.StringSession", lambda session: session)
+    monkeypatch.setattr(cli, "_qr_printer", lambda: seen["drawn"].append)
+    monkeypatch.setattr(cli.getpass, "getpass", fake_getpass)
+    return seen
+
+
+class TestLoginWithQr:
+    """When the login code does not arrive, a QR code from a signed-in app does the job."""
+
+    @pytest.fixture(autouse=True)
+    def no_real_credentials(self, claude_home):
+        pass
+
+    def test_the_flag_is_off_by_default(self):
+        assert cli.build_parser().parse_args(["login"]).qr is False
+        assert cli.build_parser().parse_args(["login", "--qr"]).qr is True
+
+    def test_a_scan_issues_the_session_string(self, monkeypatch, capsys):
+        seen = fake_qr_telethon(monkeypatch, [None])
+
+        cli.main(["login", "--qr"])
+
+        out = capsys.readouterr().out
+        assert seen["drawn"] == ["tg://login?token=token-1"]
+        assert "Signed in as: Ann (@ann, id 42)" in out
+        assert "issued-session-string" in out
+        assert seen["prompts"] == 0
+        assert seen["disconnected"] is True
+
+    def test_an_expired_code_is_replaced_and_drawn_again(self, monkeypatch, capsys):
+        seen = fake_qr_telethon(monkeypatch, [asyncio.TimeoutError(), asyncio.TimeoutError(), None])
+
+        cli.main(["login", "--qr"])
+
+        assert seen["drawn"] == [
+            "tg://login?token=token-1",
+            "tg://login?token=token-2",
+            "tg://login?token=token-3",
+        ]
+        assert "issued-session-string" in capsys.readouterr().out
+
+    def test_the_client_receives_updates(self, monkeypatch):
+        """qr.wait() learns about the scan from UpdateLoginToken: no updates, no login."""
+        seen = fake_qr_telethon(monkeypatch, [None])
+
+        cli.main(["login", "--qr"])
+
+        (client,) = seen["clients"]
+        assert client.kwargs["receive_updates"] is True
+        assert client.kwargs["device_model"] == "Claude MCP (read-only)"
+
+    def test_the_other_clients_still_do_not(self, monkeypatch):
+        seen = fake_qr_telethon(monkeypatch, [])
+        cli.build_client(None)
+        assert seen["clients"][0].kwargs["receive_updates"] is False
+
+    def test_two_step_verification_asks_for_the_password(self, monkeypatch, capsys):
+        from telethon import errors
+
+        seen = fake_qr_telethon(
+            monkeypatch, [errors.SessionPasswordNeededError(request=None)], passwords=["right-password"]
+        )
+
+        cli.main(["login", "--qr"])
+
+        assert seen["passwords"] == ["right-password"]
+        assert "issued-session-string" in capsys.readouterr().out
+
+    def test_a_wrong_password_can_be_typed_again(self, monkeypatch, capsys):
+        from telethon import errors
+
+        seen = fake_qr_telethon(
+            monkeypatch,
+            [errors.SessionPasswordNeededError(request=None)],
+            passwords=["typo", "right-password"],
+        )
+
+        cli.main(["login", "--qr"])
+
+        assert seen["passwords"] == ["typo", "right-password"]
+        captured = capsys.readouterr()
+        assert "Wrong 2FA password" in captured.err
+        assert "issued-session-string" in captured.out
+
+    def test_three_wrong_passwords_give_up_without_a_session(self, monkeypatch, capsys):
+        from telethon import errors
+
+        seen = fake_qr_telethon(
+            monkeypatch,
+            [errors.SessionPasswordNeededError(request=None)],
+            passwords=["one", "two", "three", "never-asked"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["login", "--qr"])
+
+        assert "2FA password" in str(exc.value)
+        assert seen["prompts"] == 3
+        assert seen["disconnected"] is True
+        assert "issued-session-string" not in capsys.readouterr().out
+
+    def test_without_qrcode_it_says_how_to_get_it_before_reaching_telegram(self, monkeypatch):
+        built = []
+        monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+        monkeypatch.setenv("TELEGRAM_API_HASH", "abcdef0123456789")
+        monkeypatch.setattr("telethon.TelegramClient", lambda *args, **kwargs: built.append(args))
+        monkeypatch.setitem(sys.modules, "qrcode", None)  # `import qrcode` now fails
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["login", "--qr"])
+
+        assert "--with qrcode" in str(exc.value)
+        assert built == []
+
+
+class TestQrPrinter:
+    def test_draws_the_code_and_says_where_to_scan_it(self, capsys):
+        pytest.importorskip("qrcode")
+        cli._qr_printer()("tg://login?token=abc")
+        out = capsys.readouterr().out
+        assert "\033[" not in out  # not a terminal: nothing to clear
+        assert len(out.splitlines()) > 10  # the code itself
+        assert "Settings → Devices → Link Desktop Device" in out

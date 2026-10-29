@@ -28,9 +28,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Draws the QR code for `telegram-mcp login --qr`; the server does not need it.
+qr = [
+    "qrcode>=7.4",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "qrcode>=7.4",
 ]
 
 [project.scripts]
